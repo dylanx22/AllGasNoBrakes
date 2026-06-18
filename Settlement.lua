@@ -42,6 +42,21 @@ function ST.MyDebts()
   return out
 end
 
+-- The whole raid's wager math from the last Compute(): every player's bet-by-bet
+-- lines and session net, biggest winners first (ties broken by name). Admin-only
+-- overview -- the per-player detail the transfer list alone doesn't show.
+function ST.AllMath()
+  local out = {}
+  for p, e in pairs(ST.breakdown or {}) do
+    out[#out + 1] = { player = p, net = e.net or 0, lines = e.lines or {} }
+  end
+  table.sort(out, function(a, b)
+    if a.net ~= b.net then return a.net > b.net end
+    return a.player < b.player
+  end)
+  return out
+end
+
 -- The viewer's first still-unsettled outgoing transfer, for the mail pre-fill.
 -- Returns { to, amount } where amount is the remaining copper owed, or nil.
 function ST.MailNext()

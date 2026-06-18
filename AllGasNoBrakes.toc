@@ -4,7 +4,7 @@
 ## Author: dylanx22
 ## Version: 1.0.0
 ## SavedVariables: AGNB_DB
-## IconTexture: Interface\Icons\Ability_Racial_Cannibalize
+## IconTexture: Interface\AddOns\AllGasNoBrakes\Media\minimap-skull-128.tga
 ## X-License: MIT
 
 Core.lua

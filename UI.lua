@@ -1039,12 +1039,12 @@ local function buildMinimap()
   bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
   bg:SetSize(20, 20); bg:SetPoint("TOPLEFT", 7, -5)
   local icon = b:CreateTexture(nil, "ARTWORK")
-  -- Use the addon's brand icon (same as the .toc IconTexture) -- the previous skull
-  -- path (INV_Misc_Bone_Skull_02) doesn't resolve on the Anniversary client and
-  -- rendered as a black square over the minimap background.
-  icon:SetTexture("Interface\\Icons\\Ability_Racial_Cannibalize")
-  icon:SetSize(18, 18); icon:SetPoint("TOPLEFT", 7, -6)
-  icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+  -- The brand's crowned skull, exported from the logo as a 32-bit uncompressed
+  -- TGA (top-left origin). A bare 'INV_Misc_Bone_Skull' path failed to resolve on
+  -- the Anniversary client and rendered black, so we ship our own texture. The art
+  -- is already tightly framed with transparency, so no TexCoord crop is needed.
+  icon:SetTexture("Interface\\AddOns\\AllGasNoBrakes\\Media\\minimap-skull-64.tga")
+  icon:SetSize(20, 20); icon:SetPoint("TOPLEFT", 6, -5)
   local border = b:CreateTexture(nil, "OVERLAY")
   border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
   border:SetSize(53, 53); border:SetPoint("TOPLEFT")

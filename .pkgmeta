@@ -1,0 +1,23 @@
+# CurseForge automatic packaging config.
+# The addon files live at the repo root, so the packaged zip is a single
+# AllGasNoBrakes/ folder containing the .toc, Lua, and Media. Repo-only files
+# (tests, docs, CI, screenshots) are excluded from the package.
+package-as: AllGasNoBrakes
+
+# We ship our own .toc; don't let the packager synthesize one.
+enable-toc-creation: no
+
+# Use the top section of CHANGELOG.md as the release notes instead of compiling
+# them from commit messages.
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+ignore:
+  - tests
+  - docs
+  - images
+  - .github
+  - .gitignore
+  - .pkgmeta
+  - README.md

@@ -6,11 +6,17 @@ layer of comedy -- snarky announcements, earned death titles, a post-raid
 "Lowlights Reel", and a gold "anti-prize" ledger.
 
 ## Install
+Easiest: install from CurseForge (the packaged download is a single ready-to-drop
+`AllGasNoBrakes` folder), or use the CurseForge app.
+
+From source (this repo keeps the addon files at the root for packaging):
 1. Download/clone this repo.
-2. Copy the `AllGasNoBrakes/` folder into your client's AddOns folder, e.g.
-   `World of Warcraft/_anniversary_/Interface/AddOns/` (TBC Anniversary) or
-   `World of Warcraft/_classic_/Interface/AddOns/`.
-3. Restart the game or `/reload`. Enable "Load out of date AddOns" if prompted.
+2. Make a folder named `AllGasNoBrakes` in your client's AddOns folder, e.g.
+   `World of Warcraft/_anniversary_/Interface/AddOns/AllGasNoBrakes/` (TBC
+   Anniversary) or under `_classic_/Interface/AddOns/`.
+3. Copy the addon files into it: every `*.lua`, `AllGasNoBrakes.toc`, and the
+   `Media/` folder. The repo-only folders (`tests/`, `docs/`, `images/`) aren't needed.
+4. Restart the game or `/reload`. Enable "Load out of date AddOns" if prompted.
 
 ## Commands
 - `/agnb` or `/deaths` -- toggle the window

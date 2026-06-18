@@ -43,9 +43,13 @@ local MODULES = {
   "AllGasNoBrakes/Settlement.lua",
   "AllGasNoBrakes/BookUI.lua",
 }
+-- Work in both layouts: the addon files live under AllGasNoBrakes/ in the dev
+-- repo, but at the repo root in the published (CurseForge-packaged) repo.
+local function exists(p) local f = io.open(p, "r"); if f then f:close(); return true end end
+local ROOTED = not exists("AllGasNoBrakes/Core.lua")
 for _, m in ipairs(MODULES) do
-  local f = io.open(m, "r")
-  if f then f:close(); dofile(m) end   -- skip modules not yet created
+  local path = ROOTED and (m:gsub("^AllGasNoBrakes/", "")) or m
+  if exists(path) then dofile(path) end   -- skip modules not yet created
 end
 
 -- Load and run every test file.
