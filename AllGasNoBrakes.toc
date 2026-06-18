@@ -1,4 +1,4 @@
-## Interface: 20504
+## Interface: 20505
 ## Title: All Gas No Brakes: Death Tracker
 ## Notes: Tracks raid deaths with leaderboards, lowlights, and zero brakes.
 ## Author: dylanx22

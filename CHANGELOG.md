@@ -5,7 +5,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [1.0.0] - 2026-06-18
 
-First public CurseForge release.
+First public CurseForge release. Built for Burning Crusade Classic (2.5.5).
 
 ### Added
 - MRT-style tabbed Settings (Tracking / Chat / Overlays / Gold & The Book /
