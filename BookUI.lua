@@ -72,18 +72,6 @@ local function build()
   f.body:SetPoint("TOPLEFT", 18, -184); f.body:SetWidth(346); f.body:SetJustifyH("LEFT")
   f.body:SetJustifyV("TOP")
 
-  -- admin-only "all wager math" pane: a scrollable whole-raid breakdown that
-  -- overlays the body region (the plain body FontString can't scroll, and a full
-  -- raid's bet-by-bet math runs well past the panel).
-  f.mathPane = CreateFrame("ScrollFrame", "AGNB_BookAllMathScroll", f, "UIPanelScrollFrameTemplate")
-  f.mathPane:SetPoint("TOPLEFT", 16, -184); f.mathPane:SetPoint("BOTTOMRIGHT", -30, 44)
-  f.mathChild = CreateFrame("Frame", nil, f.mathPane); f.mathChild:SetSize(316, 10)
-  f.mathPane:SetScrollChild(f.mathChild)
-  f.mathText = f.mathChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  f.mathText:SetPoint("TOPLEFT"); f.mathText:SetWidth(310)
-  f.mathText:SetJustifyH("LEFT"); f.mathText:SetJustifyV("TOP")
-  f.mathPane:Hide()
-
   -- draft join
   f.joinBtn = btn(f, "Join draft", 100, function() B().JoinDraft() end)
   f.joinBtn:SetPoint("BOTTOMLEFT", 16, 14)
@@ -94,10 +82,6 @@ local function build()
 
   f.mathBtn = btn(f, "Show math", 90, function() BUI.showMath = not BUI.showMath; BUI.Refresh() end)
   f.mathBtn:SetPoint("BOTTOMLEFT", f.joinBtn, "TOPLEFT", 0, 6)
-
-  -- admin: toggle the whole-raid wager-math pane
-  f.allMathBtn = btn(f, "All math", 90, function() BUI.showAllMath = not BUI.showAllMath; BUI.Refresh() end)
-  f.allMathBtn:SetPoint("BOTTOMLEFT", f.mathBtn, "TOPLEFT", 0, 6)
 
   -- ignore-pull picker (admin)
   f.ignoreBtn = btn(f, "Ignore a pull", 110, function() BUI.showIgnore = not BUI.showIgnore; BUI.Refresh() end)
@@ -180,9 +164,8 @@ function BUI.Refresh()
   f.offPrompt:SetShown(off); f.enableBtn:SetShown(off)
   if off then
     for _, w in ipairs({ f.state, f.openBtn, f.draftBtn, f.lockDraftBtn, f.ouLabel, f.overBtn,
-        f.underBtn, f.fbLabel, f.fbDD, f.body, f.joinBtn, f.closeBtn, f.mathBtn, f.allMathBtn,
-        f.mathPane, f.ignoreBtn, f.inviteBtn, f.settleBtn, f.title, f.adminStatus, f.adminDD,
-        f.setAdminBtn, f.clearAdminBtn }) do
+        f.underBtn, f.fbLabel, f.fbDD, f.body, f.joinBtn, f.closeBtn, f.mathBtn, f.ignoreBtn,
+        f.inviteBtn, f.settleBtn, f.title, f.adminStatus, f.adminDD, f.setAdminBtn, f.clearAdminBtn }) do
       if w then w:SetShown(false) end
     end
     return
@@ -197,7 +180,6 @@ function BUI.Refresh()
   setShown(f.closeBtn, admin)
   setShown(f.ignoreBtn, admin)
   setShown(f.mathBtn, true)
-  setShown(f.allMathBtn, admin)
 
   -- delegated-admin status + picker
   local desig = ns.db and ns.db.designatedAdmin
@@ -324,38 +306,7 @@ function BUI.Refresh()
     end
   end
 
-  -- the admin "all wager math" pane swaps in over the body when toggled on
-  local showPane = BUI.showAllMath and admin and ns.Settlement
-  if f.allMathBtn then f.allMathBtn:SetText(showPane and "Hide math" or "All math") end
-  if showPane then
-    local ml = {}
-    if not ns.Settlement.state then
-      ml[#ml + 1] = "Close the book to settle, then the whole raid's wager math shows here."
-    else
-      local all = (ns.Settlement.AllMath and ns.Settlement.AllMath()) or {}
-      if #all == 0 then
-        ml[#ml + 1] = "No wagers were placed this session."
-      else
-        for _, e in ipairs(all) do
-          ml[#ml + 1] = ("|cffffffff%s|r   net %s"):format(e.player, moneyDelta(e.net))
-          if #e.lines == 0 then
-            ml[#ml + 1] = "    (no individual bets)"
-          else
-            for _, ln in ipairs(e.lines) do
-              ml[#ml + 1] = ("    [%d] %s %s - %s (%s)"):format(ln.seq or 0, ln.bet or "?",
-                tostring(ln.pick), ln.outcome or "", moneyDelta(ln.delta))
-            end
-          end
-        end
-      end
-    end
-    f.mathText:SetText(table.concat(ml, "\n"))
-    f.mathChild:SetHeight((f.mathText:GetStringHeight() or 10) + 12)
-    f.mathPane:Show(); f.body:Hide()
-  else
-    f.mathPane:Hide(); f.body:Show()
-    f.body:SetText(table.concat(lines, "\n"))
-  end
+  f.body:SetText(table.concat(lines, "\n"))
   setShown(f.joinBtn, dr and dr.state == "OPEN")
   if f.inviteBtn then f.inviteBtn:SetShown(ns.AntiPrize and ns.AntiPrize.CanInvite() or false) end
   if f.settleBtn then

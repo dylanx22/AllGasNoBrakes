@@ -225,13 +225,13 @@ CFG.SETTINGS_LAYOUT = {
     } },
     { header = "Wagering", controls = {
       { kind = "check", key = "bookEnabled",             label = "Enable wagering (Over/Under, First Blood, Draft)", help = "bookEnabled" },
-      { kind = "check", key = "bookAutoOpenOnReadyCheck", label = "Auto-open a betting round on ready check", help = "bookAutoOpenOnReadyCheck", admin = true },
-      { kind = "check", key = "collusionWatch",          label = "Flag suspicious bet-fixing chatter to the admin", help = "collusionWatch", admin = true },
-      { kind = "edit",  key = "bookStakeOU",   label = "Over/Under stake (gold, admin)", numeric = true, help = "bookStakeOU", admin = true },
-      { kind = "edit",  key = "bookStakeFB",   label = "First Blood stake (gold, admin)", numeric = true, help = "bookStakeFB", admin = true },
-      { kind = "edit",  key = "bookDraftAnte", label = "Death Draft ante (gold, admin)", numeric = true, help = "bookDraftAnte", admin = true },
+      { kind = "check", key = "bookAutoOpenOnReadyCheck", label = "Auto-open a betting round on ready check", help = "bookAutoOpenOnReadyCheck" },
+      { kind = "check", key = "collusionWatch",          label = "Flag suspicious bet-fixing chatter to the admin", help = "collusionWatch" },
+      { kind = "edit",  key = "bookStakeOU",   label = "Over/Under stake (gold, admin)", numeric = true, help = "bookStakeOU" },
+      { kind = "edit",  key = "bookStakeFB",   label = "First Blood stake (gold, admin)", numeric = true, help = "bookStakeFB" },
+      { kind = "edit",  key = "bookDraftAnte", label = "Death Draft ante (gold, admin)", numeric = true, help = "bookDraftAnte" },
       { kind = "edit",  key = "bookMaxBetPct", label = "My bankroll cap (% of gold, 0 = none)", numeric = true, help = "bookMaxBetPct" },
-      { kind = "edit",  key = "bookLineWindow", label = "Auto-line history (pulls)", numeric = true, help = "bookLineWindow", admin = true },
+      { kind = "edit",  key = "bookLineWindow", label = "Auto-line history (pulls)", numeric = true, help = "bookLineWindow" },
     } },
   } },
 
@@ -305,22 +305,6 @@ local function buildOptions()
   local idx = 0
   local refreshers = {}   -- re-sync each control from cfg when the panel is shown
   function CFG.RefreshOptions() for _, fn in ipairs(refreshers) do fn() end end
-  -- Admin-only settings (book stakes, line window, collusion watch) only take
-  -- effect for whoever runs The Book, so non-admins see them greyed and locked.
-  local function canAdminNow()
-    if ns.Book and ns.Book.CanAdmin then return ns.Book.CanAdmin() end
-    return true
-  end
-  -- Lock/unlock a control on refresh based on admin rank, restoring the label's
-  -- original colour when unlocked. `enable`/`disable` toggle the widget itself.
-  local function registerAdminGate(label, enable, disable)
-    local r, g, b = 1, 0.82, 0.2
-    if label then r, g, b = label:GetTextColor() end
-    refreshers[#refreshers + 1] = function()
-      if canAdminNow() then enable(); if label then label:SetTextColor(r, g, b) end
-      else disable(); if label then label:SetTextColor(0.5, 0.5, 0.5) end end
-    end
-  end
   -- A small "?" to the right of `anchor` that shows tooltip text on hover.
   local function helpMarker(parent, anchor, helpKey)
     if not (helpKey and ns.Help and ns.Help.SETTING and ns.Help.SETTING[helpKey]) then return end
@@ -342,7 +326,7 @@ local function buildOptions()
     s:SetPoint("TOPLEFT", 10, y); s:SetTextColor(1, 0.82, 0.2); s:SetText(title)
     y = y - 22
   end
-  local function checkbox(key, label, onChange, help, parent, adminOnly)
+  local function checkbox(key, label, onChange, help, parent)
     parent = parent or child
     idx = idx + 1
     local name = "AGNB_Opt" .. idx
@@ -359,10 +343,9 @@ local function buildOptions()
       if onChange then onChange(v) end
     end)
     if fs then helpMarker(parent, fs, help) end
-    if adminOnly then registerAdminGate(fs, function() cb:Enable() end, function() cb:Disable() end) end
     return cb
   end
-  local function dropdown(label, key, options, onChange, help, parent, adminOnly)
+  local function dropdown(label, key, options, onChange, help, parent)
     parent = parent or child
     local lbl = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     lbl:SetPoint("TOPLEFT", 16, y); lbl:SetText(label)
@@ -393,14 +376,10 @@ local function buildOptions()
       UIDropDownMenu_SetSelectedValue(dd, ns.cfg[key]); UIDropDownMenu_SetText(dd, labelFor(ns.cfg[key]))
     end
     helpMarker(parent, lbl, help)
-    if adminOnly then
-      registerAdminGate(lbl, function() UIDropDownMenu_EnableDropDown(dd) end,
-        function() UIDropDownMenu_DisableDropDown(dd) end)
-    end
     y = y - 32
     return dd
   end
-  local function editbox(label, key, numeric, wide, help, parent, adminOnly)
+  local function editbox(label, key, numeric, wide, help, parent)
     parent = parent or child
     local lbl = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     lbl:SetPoint("TOPLEFT", 16, y - 4); lbl:SetText(label)
@@ -417,7 +396,6 @@ local function buildOptions()
     eb:SetScript("OnEscapePressed", function(self) self:SetText(tostring(ns.cfg[key] or "")); self:ClearFocus() end)
     refreshers[#refreshers + 1] = function() eb:SetText(tostring(ns.cfg[key] ~= nil and ns.cfg[key] or "")) end
     helpMarker(parent, lbl, help)
-    if adminOnly then registerAdminGate(lbl, function() eb:Enable() end, function() eb:Disable() end) end
     y = y - 28
     return eb
   end
@@ -464,9 +442,9 @@ local function buildOptions()
     local cf = tabContent[tab.id]
     y = -4
     local function renderControl(c)
-      if c.kind == "check" then checkbox(c.key, c.label, c.onChange and onChangeFor(c.onChange), c.help, cf, c.admin)
-      elseif c.kind == "dropdown" then dropdown(c.label, c.key, c.options, c.onChange and onChangeFor(c.onChange), c.help, cf, c.admin)
-      elseif c.kind == "edit" then editbox(c.label, c.key, c.numeric, c.wide, c.help, cf, c.admin)
+      if c.kind == "check" then checkbox(c.key, c.label, c.onChange and onChangeFor(c.onChange), c.help, cf)
+      elseif c.kind == "dropdown" then dropdown(c.label, c.key, c.options, c.onChange and onChangeFor(c.onChange), c.help, cf)
+      elseif c.kind == "edit" then editbox(c.label, c.key, c.numeric, c.wide, c.help, cf)
       elseif c.kind == "announceTable" then
         for _, k in ipairs(ns.Announce.KINDS) do
           checkbox("announce_" .. k.key, "Announce " .. k.label, nil, "announce_" .. k.key, cf)
