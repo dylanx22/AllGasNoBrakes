@@ -15,10 +15,17 @@ First public CurseForge release.
   "explore with sample data" preview and a 3-item quick-setup.
 - **Delegated AGNB admin**: a raid leader/assist can appoint a non-leader to run
   the Book, anti-prize, and settlement without granting WoW assist.
+- **Crowned-skull minimap icon** (and addon-list icon) drawn from the project
+  logo, replacing the placeholder ability texture.
 
 ### Changed
 - Renamed the "The Show" section to **Overlays** throughout the UI.
 - Empty list views now show a short explanatory hint instead of blank rows.
+
+### Fixed
+- Minimap button now opens on the first click instead of needing two.
+- Settings now reflect changes (such as opt-in) without a reload, and the
+  first-run quick-setup applies its choices immediately.
 
 ### Removed
 - Cleared the hardcoded developer BattleTag from the shipped code.
