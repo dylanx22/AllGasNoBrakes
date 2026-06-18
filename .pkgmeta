@@ -21,3 +21,4 @@ ignore:
   - .gitignore
   - .pkgmeta
   - README.md
+  - RELEASING.md
