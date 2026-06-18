@@ -1,0 +1,306 @@
+local _, ns = ...
+ns = ns or __AGNB_NS
+ns.Tracking = ns.Tracking or {}
+local TR = ns.Tracking
+
+-- ----- pure: damage buffer -----
+function TR.NewBuffer() return {} end
+
+function TR.RecordDamage(buf, dest, source, spell, time)
+  buf[dest] = { source = source, spell = spell, time = time }
+end
+
+function TR.LastHit(buf, dest) return buf[dest] end
+
+-- ----- pure: raid bucket id -----
+-- Bucket deaths by the instance lockout so a reload/relog or leaving and
+-- re-entering the same raid keeps one History entry. In an instance with a real
+-- instanceID we key by it; otherwise fall back to the per-session id.
+function TR.RaidIdFor(inInstance, instanceID, sessionId)
+  if inInstance and instanceID and instanceID ~= 0 then
+    return "inst-" .. tostring(instanceID)
+  end
+  return sessionId
+end
+
+-- ----- pure: environmental type normalization -----
+local ENV = { FALLING="Fall", DROWNING="Drowning", FATIGUE="Fatigue",
+              FIRE="Fire", LAVA="Lava", SLIME="Slime" }
+
+-- ----- pure: parse a normalized combat-log row into a partial death record -----
+function TR.ParseDeath(info)
+  if not info or not info.destIsPlayer then return nil end
+  if info.subevent == "UNIT_DIED" then
+    return { player = info.destName, isEnv = false }
+  elseif info.subevent == "ENVIRONMENTAL_DAMAGE" then
+    return { player = info.destName, isEnv = true,
+             envType = ENV[info.envType] or info.envType, ability = ENV[info.envType] or info.envType }
+  end
+  return nil
+end
+
+-- ----- pure: pull state -----
+function TR.NewPull(raidSize, id)
+  return setmetatable({ raidSize = raidSize, dead = 0, id = id or 1,
+                        startTime = (GetTime and GetTime()) or 0, died = {} }, {
+    __index = {
+      OnDeath = function(self)
+        local before = self.dead
+        self.dead = self.dead + 1
+        return before
+      end,
+    },
+  })
+end
+
+-- ----- WoW glue: wire combat log to DB + classification -----
+-- Reads runtime config + db from the namespace; only runs inside the game.
+function TR.StartSession()
+  TR.buffer = TR.NewBuffer()
+  TR.killcam = ns.Killcam.NewTimeline()
+  TR.pull = nil
+  TR.sessionId = "raid-" .. tostring(time and time() or 0)
+  TR.raidId = TR.sessionId
+  TR.streak = ns.Streak.NewState()
+  TR.earned = {}
+  TR.leader = nil
+  TR.pullSeq = 0
+end
+
+-- WoW glue: recompute the raid bucket from the current instance. Called on
+-- PLAYER_ENTERING_WORLD (instance enter / reload / login).
+function TR.ResolveRaidId()
+  local inInstance = (IsInInstance and (IsInInstance())) and true or false
+  local instanceID = nil
+  if inInstance and GetInstanceInfo then instanceID = select(8, GetInstanceInfo()) end
+  TR.raidId = TR.RaidIdFor(inInstance, instanceID, TR.sessionId)
+  return TR.raidId
+end
+
+local function raidSize()
+  return (GetNumGroupMembers and GetNumGroupMembers()) or 1
+end
+
+local function nextPull()
+  TR.pullSeq = (TR.pullSeq or 0) + 1
+  return TR.NewPull(raidSize(), TR.pullSeq)
+end
+
+-- Normalize CombatLogGetCurrentEventInfo() varargs into the table ParseDeath expects.
+-- Field order (TBC Classic, same as retail base params):
+--   1 timestamp, 2 subevent, 3 hideCaster, 4 sourceGUID, 5 sourceName,
+--   6 sourceFlags, 7 sourceRaidFlags, 8 destGUID, 9 destName, 10 destFlags,
+--   11 destRaidFlags, then event-specific params (12+).
+-- SPELL_* : 12 spellId, 13 spellName, 14 spellSchool.
+-- ENVIRONMENTAL_DAMAGE : 12 environmentalType.
+local function readEvent()
+  local t = { CombatLogGetCurrentEventInfo() }
+  -- spellName (t[13]) is normally a string, but some Anniversary-client events
+  -- hand back a numeric spellId here instead. Resolve it to a readable name when
+  -- we can, otherwise stringify it -- a death's ability MUST be a string so the
+  -- leaderboard's cause/source maps never mix number and string keys (which makes
+  -- their tie-break comparison crash). See DB topKey() in Database.lua.
+  local spell = t[13]
+  if type(spell) == "number" then
+    spell = (GetSpellInfo and GetSpellInfo(spell)) or tostring(spell)
+  end
+  local info = {
+    subevent = t[2],
+    sourceName = t[5],
+    destName = t[9],
+    destIsPlayer = false,
+    spell = spell,
+    envType = t[12],
+  }
+  if t[10] and bit and bit.band then
+    info.destIsPlayer = bit.band(t[10], COMBATLOG_OBJECT_TYPE_PLAYER or 0x400) > 0
+  end
+  if t[6] and bit and bit.band then
+    info.sourceIsPlayer = bit.band(t[6], COMBATLOG_OBJECT_TYPE_PLAYER or 0x400) > 0
+  end
+  local se = t[2]
+  if se == "SWING_DAMAGE" then
+    info.amount = t[12]
+  elseif se == "SPELL_DAMAGE" or se == "RANGE_DAMAGE" or se == "SPELL_PERIODIC_DAMAGE"
+      or se == "SPELL_HEAL" or se == "SPELL_PERIODIC_HEAL" then
+    info.amount = t[15]
+  end
+  return info, t[1]
+end
+
+-- Is `name` a member of the player's guild? (short name match against the roster)
+local function isGuildMember(name)
+  if not name then return false end
+  local n = (GetNumGuildMembers and GetNumGuildMembers()) or 0
+  for i = 1, n do
+    local full = GetGuildRosterInfo and GetGuildRosterInfo(i)
+    if full and (full:match("^[^-]+") or full) == name then return true end
+  end
+  return false
+end
+
+-- Guard rails: ignore deaths outside instances / outside combat when configured.
+-- Battlegrounds and arenas are NEVER tracked (instanceType "pvp"/"arena").
+local function trackingAllowed()
+  local cfg = ns.cfg or {}
+  if IsInInstance then
+    local inInstance, instanceType = IsInInstance()
+    if instanceType == "pvp" or instanceType == "arena" then return false end
+    if cfg.onlyInstances and not inInstance then return false end
+    if cfg.raidOnly and instanceType ~= "raid" then return false end  -- ignore 5-man dungeons
+  end
+  if cfg.combatOnly and InCombatLockdown and not InCombatLockdown() then
+    -- still allow env deaths mid-pull; combatOnly only gates non-combat world deaths
+    if not TR.pull then return false end
+  end
+  return true
+end
+
+function TR.OnCombatLog()
+  local info, ts = readEvent()
+  local se = info.subevent
+  if se == "SPELL_DAMAGE" or se == "SWING_DAMAGE" or se == "RANGE_DAMAGE" or se == "SPELL_PERIODIC_DAMAGE" then
+    if info.destName then
+      local spell = info.spell or (se == "SWING_DAMAGE" and "Melee") or "?"
+      TR.RecordDamage(TR.buffer, info.destName, info.sourceName or "?", spell, ts)
+      if info.destIsPlayer and TR.killcam then
+        ns.Killcam.Record(TR.killcam, info.destName,
+          { t = ts, kind = "dmg", source = info.sourceName or "?", spell = spell, amount = info.amount })
+      end
+    end
+    return
+  end
+  if (se == "SPELL_HEAL" or se == "SPELL_PERIODIC_HEAL") and info.destIsPlayer and TR.killcam then
+    ns.Killcam.Record(TR.killcam, info.destName,
+      { t = ts, kind = "heal", source = info.sourceName or "?", spell = info.spell or "Heal", amount = info.amount })
+    return
+  end
+  if se == "SPELL_CAST_SUCCESS" and info.sourceIsPlayer and info.sourceName and TR.killcam then
+    ns.Killcam.Record(TR.killcam, info.sourceName,
+      { t = ts, kind = "cast", source = info.sourceName, spell = info.spell or "?" })
+    return
+  end
+
+  local partial = TR.ParseDeath(info)
+  if not partial then return end
+  if not trackingAllowed() then return end
+
+  local cfg = ns.cfg or {}
+  if cfg.guildOnly and not isGuildMember(partial.player) then return end
+
+  TR.pull = TR.pull or nextPull()
+  local nDeadBefore = TR.pull:OnDeath()
+  local cls = ns.Classify.ClassifyDeath(nDeadBefore, TR.pull.raidSize,
+    cfg.wipeThresholdPct or 50, cfg.forgiveWipeDeaths ~= false)
+
+  local lastHit = TR.LastHit(TR.buffer, partial.player)
+  local death = {
+    player = partial.player,
+    time = ts,
+    isEnv = partial.isEnv,
+    envType = partial.envType,
+    ability = partial.ability or (lastHit and lastHit.spell) or "Unknown",
+    sourceName = lastHit and lastHit.source or partial.envType or "Unknown",
+    boss = ns.Tracking.currentBoss,
+    encounterID = ns.PhaseTracker and ns.PhaseTracker.currentEncounterID or nil,
+    phaseIndex = (ns.PhaseTracker and ns.PhaseTracker.currentPhaseIndex) or 1,
+    phase = ns.PhaseTracker and ns.PhaseTracker.currentPhase or nil,
+    pullId = (TR.pull and TR.pull.id) or 1,
+    classification = cls,
+    zone = (GetRealZoneText and GetRealZoneText()) or nil,
+    killcam = ns.Killcam.Snapshot(TR.killcam, partial.player, ts),
+  }
+
+  if ns.DB.RecordDeath(ns.db.store, TR.raidId, death) then
+    if TR.pull then TR.pull.died[death.player] = true end
+    ns.Log("debug", "death: " .. tostring(death.player) .. " <- " .. tostring(death.ability) .. " [" .. tostring(death.classification) .. "]")
+    local raid = ns.db.store.raids[TR.raidId]
+    if raid and not raid.startTime then raid.startTime = death.time end
+    if raid and not raid.zone then raid.zone = (GetRealZoneText and GetRealZoneText()) or nil end
+    local board = ns.DB.LeaderboardTonight(ns.db.store, TR.raidId)
+    if ns.Announce then ns.Announce.OnDeath(death, board) end
+    local newLeader = ns.Streak.DetectLeadChange(TR.leader, board)
+    if newLeader and ns.Announce then ns.Announce.OnComboBreaker(newLeader, board) end
+    TR.leader = board[1] and board[1].player or TR.leader
+    -- death-count milestone for this player tonight
+    if ns.Milestones and ns.Announce then
+      local myCount = 0
+      for _, b in ipairs(board) do if b.player == death.player then myCount = b.deaths end end
+      local crossed = ns.Milestones.Thresholds(myCount - 1, myCount)
+      if #crossed > 0 then ns.Announce.OnMilestone(death.player, crossed) end
+      -- all-time achievement unlocks
+      if ns.Achievements then
+        TR.earned = TR.earned or {}
+        local cur = ns.Achievements.For(ns.db.store.allTime[death.player])
+        -- First sighting this session: seed silently so already-earned achievements
+        -- aren't re-announced; only announce unlocks that happen later tonight.
+        if TR.earned[death.player] ~= nil then
+          local newOnes = ns.Milestones.NewAchievements(TR.earned[death.player], cur)
+          if #newOnes > 0 then ns.Announce.OnAchievement(death.player, newOnes) end
+        end
+        local set = {}
+        for _, a in ipairs(cur) do set[a.id] = true end
+        TR.earned[death.player] = set
+      end
+    end
+    if ns.Sync then ns.Sync.Broadcast(death) end
+    if ns.UI then ns.UI.Refresh() end
+  end
+end
+
+ns.OnInit(function()
+  ns.db.store = ns.db.store or ns.DB.NewStore()
+  TR.StartSession()
+  local f = CreateFrame("Frame")
+  f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+  f:RegisterEvent("ENCOUNTER_START")     -- fires in TBC Classic for raid bosses
+  f:RegisterEvent("ENCOUNTER_END")
+  f:RegisterEvent("PLAYER_REGEN_DISABLED") -- entering combat (trash + fallback)
+  f:RegisterEvent("PLAYER_REGEN_ENABLED")  -- leaving combat
+  f:RegisterEvent("PLAYER_ENTERING_WORLD") -- instance enter / reload / login: rebucket the raid
+  f:SetScript("OnEvent", ns.Debug.Guard("Tracking.OnEvent", function(_, event, ...)
+    if event == "COMBAT_LOG_EVENT_UNFILTERED" then
+      TR.OnCombatLog()
+    elseif event == "PLAYER_ENTERING_WORLD" then
+      TR.ResolveRaidId()
+    elseif event == "ENCOUNTER_START" then
+      local _, encounterName = ...
+      TR.currentBoss = encounterName
+      TR.pull = nextPull()
+      TR.pull.fromEncounter = true
+    elseif event == "ENCOUNTER_END" then
+      local _, encName, _, _, success = ...
+      if TR.pull then TR.pull.success = success end
+      if success == 0 and ns.Banner then ns.Banner.FireWipe(TR.currentBoss) end
+      TR.currentBoss = nil
+      if TR.pull and TR.streak then
+        local diers = {}
+        for p in pairs(TR.pull.died) do diers[#diers+1] = p end
+        local fired = ns.Streak.RecordPull(TR.streak, diers, (ns.cfg and ns.cfg.streakThreshold) or 3)
+        if ns.Announce and #fired > 0 then ns.Announce.OnStreak(fired, TR.streak) end
+      end
+      if ns.Milestones and ns.Announce and success == 1 and TR.pull then
+        local died = false
+        for _ in pairs(TR.pull.died) do died = true; break end
+        if ns.Milestones.CleanPull(died and 1 or 0, true) then
+          ns.Announce.OnSurvival("Flawless. Nobody hit the floor on " .. tostring(encName) .. ".")
+        end
+      end
+      TR.pull = nil
+    elseif event == "PLAYER_REGEN_DISABLED" then
+      -- Start a pull on combat only if a boss encounter didn't already start one.
+      if not TR.pull then TR.pull = nextPull() end
+    elseif event == "PLAYER_REGEN_ENABLED" then
+      -- End combat-based pulls; leave encounter pulls to ENCOUNTER_END.
+      if TR.pull and not TR.pull.fromEncounter then
+        if TR.streak then
+          local diers = {}
+          for p in pairs(TR.pull.died) do diers[#diers+1] = p end
+          local fired = ns.Streak.RecordPull(TR.streak, diers, (ns.cfg and ns.cfg.streakThreshold) or 3)
+          if ns.Announce and #fired > 0 then ns.Announce.OnStreak(fired, TR.streak) end
+        end
+        TR.pull = nil
+      end
+    end
+  end))
+end)

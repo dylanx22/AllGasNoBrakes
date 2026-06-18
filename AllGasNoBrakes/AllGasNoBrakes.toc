@@ -1,0 +1,44 @@
+## Interface: 20504
+## Title: All Gas No Brakes: Death Tracker
+## Notes: Tracks raid deaths with leaderboards, lowlights, and zero brakes.
+## Author: dylanx22
+## Version: 1.0.0
+## SavedVariables: AGNB_DB
+## IconTexture: Interface\Icons\Ability_Racial_Cannibalize
+## X-License: MIT
+
+Core.lua
+Debug.lua
+Hash.lua
+Book.lua
+BookSettle.lua
+BookGuard.lua
+Database.lua
+Phases.lua
+Insights.lua
+Classify.lua
+Snark.lua
+Report.lua
+Ledger.lua
+History.lua
+Export.lua
+Achievements.lua
+Killcam.lua
+Milestones.lua
+Tracking.lua
+PhaseTracker.lua
+Sync.lua
+AntiPrize.lua
+Announce.lua
+Config.lua
+Help.lua
+Welcome.lua
+UI.lua
+Brand.lua
+Streak.lua
+Banner.lua
+Summary.lua
+Demo.lua
+BookSync.lua
+Settlement.lua
+BookUI.lua

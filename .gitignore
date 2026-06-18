@@ -1,0 +1,14 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Build / dist artifacts
+dist/
+*.zip
+
+# Local working notes (not part of the published project)
+.workspace/
+.infisical.json
