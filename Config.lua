@@ -120,6 +120,8 @@ local function handleSlash(msg)
     else ns.Debug.Show() end
   elseif sub == "welcome" then
     if ns.Welcome and ns.Welcome.Show then ns.Welcome.Show() end
+  elseif sub == "tour" then
+    if ns.Tour and ns.Tour.Start then ns.Tour.Start() end
   else
     ns.Print("commands: /agnb [show | report <tonight|alltime|lowlights|ledger> | summary | ledger | invite | void | config | debug]")
   end
@@ -190,9 +192,9 @@ CFG.SETTINGS_LAYOUT = {
     { kind = "check", key = "guildOnly",         label = "Only track deaths of guild members", help = "guildOnly" },
     { kind = "check", key = "combatOnly",        label = "Only track deaths in combat", help = "combatOnly" },
     { kind = "check", key = "forgiveWipeDeaths", label = "Forgive wipe-cascade deaths", help = "forgiveWipeDeaths" },
-    { kind = "edit",  key = "wipeThresholdPct",  label = "Wipe-cascade threshold (% raid dead)", numeric = true, help = "wipeThresholdPct" },
+    { kind = "edit",  key = "wipeThresholdPct",  label = "Wipe-cascade threshold (%)", numeric = true, help = "wipeThresholdPct" },
     { kind = "check", key = "showTitles",        label = "Show earned death titles", help = "showTitles" },
-    { kind = "edit",  key = "brandName",         label = "Raid / group name (blank = guild name)", wide = true, help = "brandName" },
+    { kind = "edit",  key = "brandName",         label = "Raid / group name", wide = true, help = "brandName" },
   } } } },
 
   { id = "chat", label = "Chat", groups = {
@@ -203,8 +205,8 @@ CFG.SETTINGS_LAYOUT = {
     } },
     { header = "Announcements", controls = {
       { kind = "check", key = "soundEnabled",    label = "Play a sound on death", help = "soundEnabled" },
-      { kind = "edit",  key = "announceWindow",  label = "Announce burst window (seconds)", numeric = true, help = "announceWindow" },
-      { kind = "edit",  key = "streakThreshold", label = "Death-streak callout threshold (pulls)", numeric = true, help = "streakThreshold" },
+      { kind = "edit",  key = "announceWindow",  label = "Announce window (seconds)", numeric = true, help = "announceWindow" },
+      { kind = "edit",  key = "streakThreshold", label = "Streak threshold (pulls)", numeric = true, help = "streakThreshold" },
       { kind = "announceTable" },
     } },
   } },
@@ -221,17 +223,17 @@ CFG.SETTINGS_LAYOUT = {
   { id = "gold_book", label = "Gold & The Book", groups = {
     { header = "Gold pot", controls = {
       { kind = "check", key = "antiPrizeOptIn", label = "Join the anti-prize gold pot (opt-in)", help = "antiPrizeOptIn", onChange = "antiPrize" },
-      { kind = "edit",  key = "buyIn",          label = "Buy-in per death (gold, ledger only)", numeric = true, help = "buyIn" },
+      { kind = "edit",  key = "buyIn",          label = "Buy-in per death (gold)", numeric = true, help = "buyIn" },
     } },
     { header = "Wagering", controls = {
       { kind = "check", key = "bookEnabled",             label = "Enable wagering (Over/Under, First Blood, Draft)", help = "bookEnabled" },
-      { kind = "check", key = "bookAutoOpenOnReadyCheck", label = "Auto-open a betting round on ready check", help = "bookAutoOpenOnReadyCheck" },
-      { kind = "check", key = "collusionWatch",          label = "Flag suspicious bet-fixing chatter to the admin", help = "collusionWatch" },
-      { kind = "edit",  key = "bookStakeOU",   label = "Over/Under stake (gold, admin)", numeric = true, help = "bookStakeOU" },
-      { kind = "edit",  key = "bookStakeFB",   label = "First Blood stake (gold, admin)", numeric = true, help = "bookStakeFB" },
-      { kind = "edit",  key = "bookDraftAnte", label = "Death Draft ante (gold, admin)", numeric = true, help = "bookDraftAnte" },
-      { kind = "edit",  key = "bookMaxBetPct", label = "My bankroll cap (% of gold, 0 = none)", numeric = true, help = "bookMaxBetPct" },
-      { kind = "edit",  key = "bookLineWindow", label = "Auto-line history (pulls)", numeric = true, help = "bookLineWindow" },
+      { kind = "check", key = "bookAutoOpenOnReadyCheck", label = "Auto-open a betting round on ready check", help = "bookAutoOpenOnReadyCheck", admin = true },
+      { kind = "check", key = "collusionWatch",          label = "Flag suspicious bet-fixing chatter to the admin", help = "collusionWatch", admin = true },
+      { kind = "edit",  key = "bookStakeOU",   label = "Over/Under stake (gold)", numeric = true, help = "bookStakeOU", admin = true },
+      { kind = "edit",  key = "bookStakeFB",   label = "First Blood stake (gold)", numeric = true, help = "bookStakeFB", admin = true },
+      { kind = "edit",  key = "bookDraftAnte", label = "Death Draft ante (gold)", numeric = true, help = "bookDraftAnte", admin = true },
+      { kind = "edit",  key = "bookMaxBetPct", label = "My bankroll cap (%)", numeric = true, help = "bookMaxBetPct" },
+      { kind = "edit",  key = "bookLineWindow", label = "Auto-line history (pulls)", numeric = true, help = "bookLineWindow", admin = true },
     } },
   } },
 
@@ -305,6 +307,22 @@ local function buildOptions()
   local idx = 0
   local refreshers = {}   -- re-sync each control from cfg when the panel is shown
   function CFG.RefreshOptions() for _, fn in ipairs(refreshers) do fn() end end
+  -- Admin-only settings (book stakes, line window, collusion watch) only take
+  -- effect for whoever runs The Book, so non-admins see them greyed and locked.
+  local function canAdminNow()
+    if ns.Book and ns.Book.CanAdmin then return ns.Book.CanAdmin() end
+    return true
+  end
+  -- Lock/unlock a control on refresh based on admin rank, restoring the label's
+  -- original colour when unlocked. `enable`/`disable` toggle the widget itself.
+  local function registerAdminGate(label, enable, disable)
+    local r, g, b = 1, 0.82, 0.2
+    if label then r, g, b = label:GetTextColor() end
+    refreshers[#refreshers + 1] = function()
+      if canAdminNow() then enable(); if label then label:SetTextColor(r, g, b) end
+      else disable(); if label then label:SetTextColor(0.5, 0.5, 0.5) end end
+    end
+  end
   -- A small "?" to the right of `anchor` that shows tooltip text on hover.
   local function helpMarker(parent, anchor, helpKey)
     if not (helpKey and ns.Help and ns.Help.SETTING and ns.Help.SETTING[helpKey]) then return end
@@ -326,7 +344,7 @@ local function buildOptions()
     s:SetPoint("TOPLEFT", 10, y); s:SetTextColor(1, 0.82, 0.2); s:SetText(title)
     y = y - 22
   end
-  local function checkbox(key, label, onChange, help, parent)
+  local function checkbox(key, label, onChange, help, parent, adminOnly)
     parent = parent or child
     idx = idx + 1
     local name = "AGNB_Opt" .. idx
@@ -335,17 +353,20 @@ local function buildOptions()
     -- TBC Classic exposes the label as the named "<name>Text" fontstring, not cb.Text.
     local fs = _G[name .. "Text"] or cb.Text
     if fs then fs:SetText(label) end
-    cb:SetChecked(ns.cfg[key])
-    refreshers[#refreshers + 1] = function() cb:SetChecked(ns.cfg[key]) end
+    local function seed() cb:SetChecked(ns.cfg[key]) end
+    seed()
+    cb:HookScript("OnShow", seed)
+    refreshers[#refreshers + 1] = seed
     cb:SetScript("OnClick", function(self)
       local v = self:GetChecked() and true or false
       ns.cfg[key] = v
       if onChange then onChange(v) end
     end)
     if fs then helpMarker(parent, fs, help) end
+    if adminOnly then registerAdminGate(fs, function() cb:Enable() end, function() cb:Disable() end) end
     return cb
   end
-  local function dropdown(label, key, options, onChange, help, parent)
+  local function dropdown(label, key, options, onChange, help, parent, adminOnly)
     parent = parent or child
     local lbl = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     lbl:SetPoint("TOPLEFT", 16, y); lbl:SetText(label)
@@ -370,23 +391,39 @@ local function buildOptions()
         UIDropDownMenu_AddButton(info)
       end
     end)
-    UIDropDownMenu_SetSelectedValue(dd, ns.cfg[key])
-    UIDropDownMenu_SetText(dd, labelFor(ns.cfg[key]))
-    refreshers[#refreshers + 1] = function()
+    local function seed()
       UIDropDownMenu_SetSelectedValue(dd, ns.cfg[key]); UIDropDownMenu_SetText(dd, labelFor(ns.cfg[key]))
     end
+    seed()
+    dd:HookScript("OnShow", seed)
+    refreshers[#refreshers + 1] = seed
     helpMarker(parent, lbl, help)
+    if adminOnly then
+      registerAdminGate(lbl, function() UIDropDownMenu_EnableDropDown(dd) end,
+        function() UIDropDownMenu_DisableDropDown(dd) end)
+    end
     y = y - 32
     return dd
   end
-  local function editbox(label, key, numeric, wide, help, parent)
+  local function editbox(label, key, numeric, wide, help, parent, adminOnly)
     parent = parent or child
     local lbl = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     lbl:SetPoint("TOPLEFT", 16, y - 4); lbl:SetText(label)
     local eb = CreateFrame("EditBox", "AGNB_EB_" .. key, parent, "InputBoxTemplate")
     eb:SetSize(wide and 200 or 56, 20); eb:SetPoint("TOPLEFT", 248, y - 2); eb:SetAutoFocus(false)
     if numeric then eb:SetNumeric(true) end
-    eb:SetText(tostring(ns.cfg[key] ~= nil and ns.cfg[key] or ""))
+    -- Re-seed the box from cfg. An EditBox never paints text that was set while
+    -- its frame (or its settings tab / the whole panel) was hidden, and SetText is
+    -- a no-op when the new string matches the current one -- so a plain re-SetText
+    -- leaves the box blank even though the value is stored. Clearing first forces a
+    -- real change, and seeding on every OnShow makes reopening Settings or switching
+    -- tabs always repaint the saved value.
+    local function seed()
+      eb:SetText(""); eb:SetText(tostring(ns.cfg[key] ~= nil and ns.cfg[key] or ""))
+      eb:SetCursorPosition(0)
+    end
+    seed()
+    eb:HookScript("OnShow", seed)
     eb:SetScript("OnEnterPressed", function(self)
       local v = self:GetText()
       if numeric then ns.cfg[key] = tonumber(v) or ns.cfg[key]; self:SetText(tostring(ns.cfg[key]))
@@ -394,8 +431,9 @@ local function buildOptions()
       self:ClearFocus()
     end)
     eb:SetScript("OnEscapePressed", function(self) self:SetText(tostring(ns.cfg[key] or "")); self:ClearFocus() end)
-    refreshers[#refreshers + 1] = function() eb:SetText(tostring(ns.cfg[key] ~= nil and ns.cfg[key] or "")) end
+    refreshers[#refreshers + 1] = seed
     helpMarker(parent, lbl, help)
+    if adminOnly then registerAdminGate(lbl, function() eb:Enable() end, function() eb:Disable() end) end
     y = y - 28
     return eb
   end
@@ -442,9 +480,9 @@ local function buildOptions()
     local cf = tabContent[tab.id]
     y = -4
     local function renderControl(c)
-      if c.kind == "check" then checkbox(c.key, c.label, c.onChange and onChangeFor(c.onChange), c.help, cf)
-      elseif c.kind == "dropdown" then dropdown(c.label, c.key, c.options, c.onChange and onChangeFor(c.onChange), c.help, cf)
-      elseif c.kind == "edit" then editbox(c.label, c.key, c.numeric, c.wide, c.help, cf)
+      if c.kind == "check" then checkbox(c.key, c.label, c.onChange and onChangeFor(c.onChange), c.help, cf, c.admin)
+      elseif c.kind == "dropdown" then dropdown(c.label, c.key, c.options, c.onChange and onChangeFor(c.onChange), c.help, cf, c.admin)
+      elseif c.kind == "edit" then editbox(c.label, c.key, c.numeric, c.wide, c.help, cf, c.admin)
       elseif c.kind == "announceTable" then
         for _, k in ipairs(ns.Announce.KINDS) do
           checkbox("announce_" .. k.key, "Announce " .. k.label, nil, "announce_" .. k.key, cf)

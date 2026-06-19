@@ -86,3 +86,21 @@ do
   local c = B.NetChecksum({ Anna = 7, Bob = -7 })
   T.ok(a ~= c, "different nets -> different checksum")
 end
+
+-- ST.AllMath: whole-raid breakdown, biggest winners first, name-tiebroken.
+do
+  local ST = __AGNB_NS.Settlement
+  ST.breakdown = {
+    Bob  = { net = -50, lines = { { seq = 1, delta = -50 } } },
+    Anna = { net = 80,  lines = { { seq = 1, delta = 80 } } },
+    Cara = { net = 80,  lines = {} },
+  }
+  local all = ST.AllMath()
+  T.eq(#all, 3, "one row per player")
+  T.eq(all[1].player, "Anna", "ties broken by name (Anna before Cara)")
+  T.eq(all[2].player, "Cara", "second tie member")
+  T.eq(all[3].player, "Bob", "loser ranks last")
+  T.eq(all[1].net, 80, "net carried through")
+  ST.breakdown = nil
+  T.eq(#ST.AllMath(), 0, "empty when nothing computed")
+end

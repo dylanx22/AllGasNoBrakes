@@ -42,6 +42,7 @@ local MODULES = {
   "AllGasNoBrakes/BookSync.lua",
   "AllGasNoBrakes/Settlement.lua",
   "AllGasNoBrakes/BookUI.lua",
+  "AllGasNoBrakes/Tour.lua",
 }
 -- Work in both layouts: the addon files live under AllGasNoBrakes/ in the dev
 -- repo, but at the repo root in the published (CurseForge-packaged) repo.
@@ -78,6 +79,7 @@ local TESTS = {
   "tests/test_config_tabs.lua",
   "tests/test_help.lua",
   "tests/test_welcome.lua",
+  "tests/test_tour.lua",
   "tests/test_book_admin.lua",
   "tests/test_brand.lua",
   "tests/test_streak.lua",

@@ -527,6 +527,13 @@ function UI.Build()
 
   local close = CreateFrame("Button", nil, f, "UIPanelCloseButton"); close:SetPoint("TOPRIGHT", 2, 2)
 
+  -- The interactive tour's highlight + callout are parented to UIParent (so they
+  -- can sit beside the window), so closing the window won't hide them on its own.
+  -- End the tour when the window closes so they never linger on screen.
+  f:HookScript("OnHide", function()
+    if ns.Tour and ns.Tour.frame and ns.Tour.frame:IsShown() then ns.Tour.Finish() end
+  end)
+
   -- header divider
   local hd = f:CreateTexture(nil, "ARTWORK"); hd:SetColorTexture(0.23, 0.18, 0.09, 1)
   hd:SetPoint("TOPLEFT", 10, -54); hd:SetPoint("TOPRIGHT", -10, -54); hd:SetHeight(1)

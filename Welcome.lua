@@ -87,6 +87,14 @@ function W.Show()
       if ns.UI then ns.UI.Build(); ns.UI.frame:Show(); ns.UI.Refresh() end
     end)
 
+    -- first page offers the guided, interactive tour (drives the real window)
+    d.tour = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
+    d.tour:SetSize(190, 22); d.tour:SetPoint("BOTTOM", 0, 44); d.tour:SetText("Take the interactive tour")
+    d.tour:SetScript("OnClick", function()
+      ns.Welcome.MarkSeen(ns.cfg); d:Hide()
+      if ns.Tour and ns.Tour.Start then ns.Tour.Start() end
+    end)
+
     d.back = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
     d.back:SetSize(80, 22); d.back:SetPoint("BOTTOMLEFT", 16, 16); d.back:SetText("Back")
     d.next = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
@@ -109,6 +117,7 @@ function W.Show()
       d.title:SetText(pg.title); d.body:SetText(pg.body)
       d.qs.channelDD:SetShown(last); d.qs.wager:SetShown(last); d.qs.pot:SetShown(last)
       d.explore:SetShown(d.page == 2)
+      d.tour:SetShown(d.page == 1)
       d.back:SetEnabled(d.page > 1)
       d.next:SetText(last and "Got it" or "Next")
     end

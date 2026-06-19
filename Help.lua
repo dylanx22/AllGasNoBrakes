@@ -119,7 +119,9 @@ function H.Refresh()
     if b.command then line("GameFontDisableSmall", b.command, { 0.6, 0.8, 1 }) end
     y = y - 6
   end
-  -- a final pointer to replay the welcome tour
+  -- final pointers: replay the guided tour or the first-run welcome
+  line("GameFontNormal", "Take the guided tour", GOLD)
+  line("GameFontDisableSmall", "/agnb tour", { 0.6, 0.8, 1 })
   line("GameFontNormal", "Replay the welcome", GOLD)
   line("GameFontDisableSmall", "/agnb welcome", { 0.6, 0.8, 1 })
   for j = i + 1, #p.lines do p.lines[j]:Hide() end

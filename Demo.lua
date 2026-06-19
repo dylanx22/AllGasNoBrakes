@@ -13,6 +13,11 @@ local SOURCES   = { "Prince Malchezaar", "Gruul the Dragonkiller", "Magtheridon"
                     "Trash Pack", "Lady Vashj", "Kael'thas Sunstrider", "High King Maulgar" }
 local BOSSES    = { "Prince Malchezaar", "Gruul the Dragonkiller", "Magtheridon" }
 local ENVTYPES  = { "Lava", "Fire", "Fall" }
+-- Color for the killcam timeline: who topped the player off and what hit them on
+-- the way down, leading into the lethal blow.
+local HEALERS   = { "Healbot", "Mendmaster", "Lightbringer", "Holysmokes", "Moonfyre" }
+local HEALS     = { "Flash Heal", "Greater Heal", "Healing Wave", "Renew", "Regrowth" }
+local INCOMING  = { "Melee", "Shadow Bolt", "Cleave", "Flame Buffet", "Crushing Blow" }
 
 -- Canned names used to pad/replace the roster so the demo always lists a full,
 -- realistic-sized raid (>= 25 so the leaderboard scrolls).
@@ -28,6 +33,31 @@ local function pickFrom(list, rng)
   return list[i]
 end
 
+-- A short, believable killcam timeline ending in the lethal blow at `deathTime`,
+-- so the killcam view/popup has real rows to render in demos. Derived purely from
+-- `seq` (no rng draws) so it never perturbs the deterministic death sequence.
+local function makeKillcam(seq, deathTime, ability, source, isEnv)
+  local function amt(base, k) return base + ((seq * 37 + k * 53) % 600) end
+  local function pick(list, k) return list[((seq + k) % #list) + 1] end
+  local src = isEnv and "Environment" or source
+  if isEnv then
+    return {
+      { t = deathTime - 6, kind = "dmg",  source = src, spell = ability, amount = amt(900, 1) },
+      { t = deathTime - 4, kind = "heal", source = pick(HEALERS, 2), spell = pick(HEALS, 1), amount = amt(1500, 2) },
+      { t = deathTime - 2, kind = "dmg",  source = src, spell = ability, amount = amt(1100, 3) },
+      { t = deathTime,     kind = "dmg",  source = src, spell = ability, amount = amt(2600, 4) },
+    }
+  end
+  return {
+    { t = deathTime - 7.5, kind = "dmg",  source = src,             spell = pick(INCOMING, 1), amount = amt(800, 1) },
+    { t = deathTime - 6,   kind = "heal", source = pick(HEALERS, 2), spell = pick(HEALS, 2),    amount = amt(1700, 2) },
+    { t = deathTime - 4.2, kind = "cast", source = src,             spell = ability },
+    { t = deathTime - 3,   kind = "dmg",  source = src,             spell = pick(INCOMING, 3), amount = amt(1200, 3) },
+    { t = deathTime - 1.4, kind = "heal", source = pick(HEALERS, 4), spell = pick(HEALS, 4),    amount = amt(1400, 4) },
+    { t = deathTime,       kind = "dmg",  source = src,             spell = ability,            amount = amt(3200, 5) },
+  }
+end
+
 -- Build one death record for `player` at sequence position `seq`. When forceCounted
 -- is true the death is never wipe-cascade (so demo counts match exactly).
 local function makeDeath(seq, player, rng, forceCounted)
@@ -35,10 +65,12 @@ local function makeDeath(seq, player, rng, forceCounted)
   local ability = isEnv and pickFrom(ENVTYPES, rng) or pickFrom(ABILITIES, rng)
   local source = isEnv and "Environment" or pickFrom(SOURCES, rng)
   local cls = (not forceCounted and rng() < 0.12) and "wipeCascade" or "counted"
+  local time = seq * 5
   return {
-    player = player, time = seq * 5, ability = ability, sourceName = source,
+    player = player, time = time, ability = ability, sourceName = source,
     isEnv = isEnv, envType = isEnv and ability or nil, boss = pickFrom(BOSSES, rng),
     pullId = math.floor((seq - 1) / 4) + 1, classification = cls,
+    killcam = makeKillcam(seq, time, ability, source, isEnv),
   }
 end
 

@@ -88,9 +88,11 @@ end
 function D.Show()
   local f = D.Build()
   local lines = (ns.db and ns.db.debugLog) or {}
+  -- Show first, then fill: an EditBox won't paint text set while it's hidden, so
+  -- seeding after Show() guarantees the log is visible on the first open.
+  f:Show()
   f.edit:SetText(table.concat(lines, "\n"))
   f.edit:SetCursorPosition(0)
-  f:Show()
 end
 
 function D.Clear()

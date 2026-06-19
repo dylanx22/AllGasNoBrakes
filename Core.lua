@@ -2,7 +2,7 @@ local ADDON, ns = ...
 ns = ns or __AGNB_NS
 
 ns.name = ADDON or "AllGasNoBrakes"
-ns.version = "1.0.0"
+ns.version = "1.1.0"
 ns.modules = {}            -- init hooks, registered by other modules
 ns.slash = {}              -- subcommand -> function(args)
 

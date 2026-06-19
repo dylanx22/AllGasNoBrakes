@@ -2,7 +2,7 @@
 ## Title: All Gas No Brakes: Death Tracker
 ## Notes: Tracks raid deaths with leaderboards, lowlights, and zero brakes.
 ## Author: dylanx22
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariables: AGNB_DB
 ## IconTexture: Interface\AddOns\AllGasNoBrakes\Media\minimap-skull-128.tga
 ## X-License: MIT
@@ -42,3 +42,4 @@ Demo.lua
 BookSync.lua
 Settlement.lua
 BookUI.lua
+Tour.lua
