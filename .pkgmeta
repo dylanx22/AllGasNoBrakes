@@ -4,9 +4,6 @@
 # (tests, docs, CI, screenshots) are excluded from the package.
 package-as: AllGasNoBrakes
 
-# We ship our own .toc; don't let the packager synthesize one.
-enable-toc-creation: no
-
 # Use the top section of CHANGELOG.md as the release notes instead of compiling
 # them from commit messages.
 manual-changelog:
