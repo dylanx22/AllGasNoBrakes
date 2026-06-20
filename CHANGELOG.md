@@ -5,6 +5,37 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-06-20
+
+### Added
+- **Raid Info tab** — see every group member, who's running the addon and which version
+  (green = current, yellow = different), each person's role, and who holds the Book admin.
+- **Pug exclusion** — tag a raid as a pug (`/agnb pug` or the History view) to keep it in
+  Tonight/History but leave it out of your All-Time stats.
+- **Auto-rounds** (The Book) — optionally open a new betting round automatically between pulls.
+  Off by default (ready-check opening stays the default); toggle it in Settings or with the
+  in-window **Auto-rounds** button. Opens are driven off combat ending and only inside raids.
+- **One-click opt-in** — when an admin opens betting, non-participants get a single prompt to
+  join wagering instead of silently seeing nothing.
+- A **Raid Hot Seat** button in the Book admin row (previously slash-only).
+
+### Changed
+- **The Book is raids-only** — betting rounds/popups no longer open in 5-man dungeons.
+- **One bet per round** — a placed bet locks and can't be changed mid-pull.
+- Reworked the Book window for clarity: admin controls grouped at the top, a **YOUR BETS**
+  section, a plainer status line, and "who runs the Book" shown top-right.
+
+### Fixed
+- Spell names now show correctly instead of a raw spell ID number.
+- Falling/lava damage is no longer logged as phantom deaths.
+- The death log no longer shows the same death 2–3× (clock-skew-proof dedup by local receipt
+  time + killcam reconciliation); a one-time cleanup scrubs old duplicate/phantom rows and
+  re-resolves old numeric spell names in saved data.
+- UI button errors now surface in the debug log instead of failing silently.
+- Hardened settlement and death sync against malformed/missing data: a missing Hot Seat
+  outcome no longer mis-pays, broadcast outcomes are validated before overriding the local
+  result, the death-receive path is nil-guarded, and settlement timer callbacks are guarded.
+
 ## [1.2.0] - 2026-06-19
 
 ### Added

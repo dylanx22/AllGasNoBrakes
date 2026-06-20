@@ -24,7 +24,10 @@ end
 
 local function btn(parent, label, w, onClick)
   local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-  b:SetSize(w or 90, 22); b:SetText(label); b:SetScript("OnClick", onClick)
+  b:SetSize(w or 90, 22); b:SetText(label)
+  -- guard the click so an error surfaces in the debug log instead of silently doing nothing
+  -- (WoW swallows handler errors -- this is how a nil-call bug hid as "the button does nothing").
+  b:SetScript("OnClick", ns.Debug.Guard("book-btn:" .. tostring(label), onClick))
   return b
 end
 
@@ -51,48 +54,55 @@ local function build()
   f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
   f.title:SetPoint("TOPLEFT", 16, -14); f.title:SetText("The Book"); f.title:SetTextColor(unpack(GOLD))
   f.state = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  f.state:SetPoint("TOPLEFT", 16, -36); f.state:SetWidth(340); f.state:SetJustifyH("LEFT")
+  f.state:SetPoint("TOPLEFT", 16, -36); f.state:SetWidth(560); f.state:SetJustifyH("LEFT")
 
   -- admin row -- buttons auto-size to their labels so the row fits narrow windows
   f.openBtn = fitBtn(btn(f, "Open round", 100, function() B().OpenRound() end))
   f.openBtn:SetPoint("TOPLEFT", 14, -56)
   f.draftBtn = fitBtn(btn(f, "Open draft", 100, function() B().OpenDraft() end))
   f.draftBtn:SetPoint("LEFT", f.openBtn, "RIGHT", 6, 0)
+  f.rhsOpenBtn = fitBtn(btn(f, "Raid Hot Seat", 110, function() if ns.Book.OpenRaidHotSeat then ns.Book.OpenRaidHotSeat() end end))
+  f.rhsOpenBtn:SetPoint("LEFT", f.draftBtn, "RIGHT", 6, 0)
   f.lockDraftBtn = fitBtn(btn(f, "Lock draft", 90, function() B().LockDraft() end))
-  f.lockDraftBtn:SetPoint("LEFT", f.draftBtn, "RIGHT", 6, 0)
+  f.lockDraftBtn:SetPoint("LEFT", f.rhsOpenBtn, "RIGHT", 6, 0)
+
+  -- ----- your bets (this pull) ----- a labeled block so it's clear what you click to bet
+  f.betHeader = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  f.betHeader:SetPoint("TOPLEFT", 16, -118); f.betHeader:SetTextColor(0.7, 0.62, 0.36)
+  f.betHeader:SetText("YOUR BETS")
 
   -- over/under
   f.ouLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  f.ouLabel:SetPoint("TOPLEFT", 16, -92); f.ouLabel:SetTextColor(unpack(TAN))
+  f.ouLabel:SetPoint("TOPLEFT", 16, -138); f.ouLabel:SetTextColor(unpack(TAN))
   f.overBtn = btn(f, "Over", 80, function() B().PlaceOU("over") end)
-  f.overBtn:SetPoint("TOPLEFT", 16, -112)
+  f.overBtn:SetPoint("TOPLEFT", 16, -158)
   f.underBtn = btn(f, "Under", 80, function() B().PlaceOU("under") end)
   f.underBtn:SetPoint("LEFT", f.overBtn, "RIGHT", 6, 0)
 
   -- first blood: a dropdown of candidates + "no deaths"
   f.fbLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  f.fbLabel:SetPoint("TOPLEFT", 16, -146); f.fbLabel:SetText("First Blood:"); f.fbLabel:SetTextColor(unpack(TAN))
+  f.fbLabel:SetPoint("TOPLEFT", 16, -192); f.fbLabel:SetText("First Blood:"); f.fbLabel:SetTextColor(unpack(TAN))
   f.fbDD = CreateFrame("Frame", "AGNB_BookFB_DD", f, "UIDropDownMenuTemplate")
-  f.fbDD:SetPoint("TOPLEFT", 96, -142); UIDropDownMenu_SetWidth(f.fbDD, 150)
+  f.fbDD:SetPoint("TOPLEFT", 96, -188); UIDropDownMenu_SetWidth(f.fbDD, 150)
 
   -- hot seat: dealt-target row (label + Survives / Dies buttons)
   f.hsLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  f.hsLabel:SetPoint("TOPLEFT", 16, -174); f.hsLabel:SetTextColor(unpack(TAN))
+  f.hsLabel:SetPoint("TOPLEFT", 16, -220); f.hsLabel:SetTextColor(unpack(TAN))
   f.hsSurvBtn = btn(f, "Survives", 80, function() ns.Book.PlaceHS("survives") end)
-  f.hsSurvBtn:SetPoint("TOPLEFT", 16, -194)
+  f.hsSurvBtn:SetPoint("TOPLEFT", 16, -240)
   f.hsDiesBtn = btn(f, "Dies", 80, function() ns.Book.PlaceHS("dies") end)
   f.hsDiesBtn:SetPoint("LEFT", f.hsSurvBtn, "RIGHT", 6, 0)
 
   -- results / standings text
   f.body = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  f.body:SetPoint("TOPLEFT", 18, -220); f.body:SetWidth(346); f.body:SetJustifyH("LEFT")
+  f.body:SetPoint("TOPLEFT", 18, -272); f.body:SetWidth(346); f.body:SetJustifyH("LEFT")
   f.body:SetJustifyV("TOP")
 
   -- admin-only "all wager math" pane: a scrollable whole-raid breakdown that
   -- overlays the body region (the plain body FontString can't scroll, and a full
   -- raid's bet-by-bet math runs well past the panel).
   f.mathPane = CreateFrame("ScrollFrame", "AGNB_BookAllMathScroll", f, "UIPanelScrollFrameTemplate")
-  f.mathPane:SetPoint("TOPLEFT", 16, -220); f.mathPane:SetPoint("BOTTOMRIGHT", -30, 44)
+  f.mathPane:SetPoint("TOPLEFT", 16, -272); f.mathPane:SetPoint("BOTTOMRIGHT", -30, 44)
   f.mathChild = CreateFrame("Frame", nil, f.mathPane); f.mathChild:SetSize(316, 10)
   f.mathPane:SetScrollChild(f.mathChild)
   f.mathText = f.mathChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -110,30 +120,40 @@ local function build()
   f.closeBtn = fitBtn(btn(f, "Close book", 100, function() if ns.Book.CloseBook then ns.Book.CloseBook() end end))
   f.closeBtn:SetPoint("LEFT", f.lockDraftBtn, "RIGHT", 6, 0)
 
-  f.mathBtn = btn(f, "Show math", 90, function() BUI.showMath = not BUI.showMath; BUI.Refresh() end)
-  f.mathBtn:SetPoint("BOTTOMLEFT", f.joinBtn, "TOPLEFT", 0, 6)
-
-  -- admin: toggle the whole-raid wager-math pane
-  f.allMathBtn = btn(f, "All math", 90, function() BUI.showAllMath = not BUI.showAllMath; BUI.Refresh() end)
-  f.allMathBtn:SetPoint("BOTTOMLEFT", f.mathBtn, "TOPLEFT", 0, 6)
-
-  -- ignore-pull picker (admin)
-  f.ignoreBtn = btn(f, "Ignore a pull", 110, function() BUI.showIgnore = not BUI.showIgnore; BUI.Refresh() end)
+  -- ----- admin tools row: sits directly under the admin action row (top of the panel) so
+  -- all the run-the-book controls are grouped together instead of split top/bottom. The
+  -- "Book Admin" (allMathBtn) toggle anchors here in Refresh; the rest chain off it.
+  -- fitBtn so the row stays compact and fits the default-width window (the content host is
+  -- only ~510px at the 640 default; fixed widths overflowed and clipped "Invite to pot").
+  f.allMathBtn = fitBtn(btn(f, "Book Admin", 90, function() BUI.showAllMath = not BUI.showAllMath; BUI.Refresh() end))
+  f.allMathBtn:SetPoint("TOPLEFT", 14, -88)
+  f.mathBtn = fitBtn(btn(f, "Show math", 90, function() BUI.showMath = not BUI.showMath; BUI.Refresh() end))
+  f.mathBtn:SetPoint("LEFT", f.allMathBtn, "RIGHT", 6, 0)
+  f.ignoreBtn = fitBtn(btn(f, "Ignore a pull", 110, function() BUI.showIgnore = not BUI.showIgnore; BUI.Refresh() end))
   f.ignoreBtn:SetPoint("LEFT", f.mathBtn, "RIGHT", 6, 0)
-
+  -- auto-rounds toggle (admin): turn the between-pulls auto-open on/off for the session.
+  f.autoBtn = fitBtn(btn(f, "Auto-rounds", 130, function()
+    if ns.cfg then ns.cfg.bookAutoRounds = not ns.cfg.bookAutoRounds end
+    BUI.Refresh()
+  end))
+  f.autoBtn:SetPoint("LEFT", f.ignoreBtn, "RIGHT", 6, 0)
   -- invite to pot (admin action, formerly a nav item)
-  f.inviteBtn = btn(f, "Invite to pot", 110, function() if ns.AntiPrize then ns.AntiPrize.Invite() end end)
-  f.inviteBtn:SetPoint("BOTTOMRIGHT", -14, 14)
+  f.inviteBtn = fitBtn(btn(f, "Invite to pot", 110, function() if ns.AntiPrize then ns.AntiPrize.Invite() end end))
+  f.inviteBtn:SetPoint("LEFT", f.autoBtn, "RIGHT", 6, 0)
 
   f.settleBtn = btn(f, "Settle by mail", 120, function() BUI.SettleByMail() end)
-  f.settleBtn:SetPoint("BOTTOMRIGHT", f.inviteBtn, "TOPRIGHT", 0, 6)
+  f.settleBtn:SetPoint("BOTTOMRIGHT", -14, 14)
 
   -- ----- delegated admin: status (everyone) + picker (leaders only) -----
   -- Sits as its own row ABOVE the left button stack (Join/Show math/All math).
   -- The picker dropdown previously overlapped the "All math" button, which was
   -- added to that stack later -- keep this block clear of the top button (y92).
+  -- "who runs the Book" sits top-right (info for everyone); the leader-only Set/Clear
+  -- picker controls stay tucked at the bottom-left (rarely used).
   f.adminStatus = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  f.adminStatus:SetPoint("BOTTOMLEFT", 16, 134); f.adminStatus:SetJustifyH("LEFT")
+  f.adminStatus:SetPoint("TOPRIGHT", -16, -38); f.adminStatus:SetJustifyH("RIGHT"); f.adminStatus:SetWidth(360)
+  f.adminPickLabel = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  f.adminPickLabel:SetPoint("BOTTOMLEFT", 16, 134); f.adminPickLabel:SetText("Appoint a Book admin (delegate):")
   f.adminDD = CreateFrame("Frame", "AGNB_BookAdmin_DD", f, "UIDropDownMenuTemplate")
   f.adminDD:SetPoint("BOTTOMLEFT", 0, 102); UIDropDownMenu_SetWidth(f.adminDD, 120)
   f.setAdminBtn = btn(f, "Set admin", 90, function()
@@ -256,10 +276,10 @@ function BUI.Refresh()
   local off = not (ns.cfg and ns.cfg.bookEnabled)
   f.offPrompt:SetShown(off); f.enableBtn:SetShown(off)
   if off then
-    for _, w in ipairs({ f.state, f.openBtn, f.draftBtn, f.lockDraftBtn, f.ouLabel, f.overBtn,
+    for _, w in ipairs({ f.state, f.betHeader, f.openBtn, f.draftBtn, f.rhsOpenBtn, f.lockDraftBtn, f.ouLabel, f.overBtn,
         f.underBtn, f.fbLabel, f.fbDD, f.hsLabel, f.hsSurvBtn, f.hsDiesBtn, f.body, f.joinBtn,
-        f.closeBtn, f.mathBtn, f.allMathBtn, f.mathPane, f.ignoreBtn, f.inviteBtn, f.settleBtn,
-        f.title, f.adminStatus, f.adminDD, f.setAdminBtn, f.clearAdminBtn }) do
+        f.closeBtn, f.mathBtn, f.allMathBtn, f.mathPane, f.ignoreBtn, f.autoBtn, f.inviteBtn, f.settleBtn,
+        f.title, f.adminStatus, f.adminPickLabel, f.adminDD, f.setAdminBtn, f.clearAdminBtn }) do
       if w then w:SetShown(false) end
     end
     return
@@ -270,21 +290,38 @@ function BUI.Refresh()
   local admin = ns.Book.CanAdmin()
 
   setShown(f.openBtn, admin); setShown(f.draftBtn, admin)
+  -- Raid Hot Seat opener: admin only, hidden once a raid HS is live (the OpenRaidHotSeat
+  -- guard also blocks a re-open, but hiding keeps the row honest).
+  local rhLive = rt() and rt().raidHS and rt().raidHS.state ~= "SETTLED"
+  local rhsShown = admin and not rhLive
+  setShown(f.rhsOpenBtn, rhsShown)
   local lockOpen = admin and dr and dr.state == "OPEN"
   setShown(f.lockDraftBtn, lockOpen)
   setShown(f.closeBtn, admin)
-  -- close up the row when Lock draft is hidden (no empty slot for it)
-  f.closeBtn:ClearAllPoints()
-  f.closeBtn:SetPoint("LEFT", lockOpen and f.lockDraftBtn or f.draftBtn, "RIGHT", 6, 0)
+  -- chain the admin action row left-to-right, skipping hidden buttons so there are no gaps.
+  local prev = f.draftBtn
+  if rhsShown then f.rhsOpenBtn:ClearAllPoints(); f.rhsOpenBtn:SetPoint("LEFT", prev, "RIGHT", 6, 0); prev = f.rhsOpenBtn end
+  if lockOpen then f.lockDraftBtn:ClearAllPoints(); f.lockDraftBtn:SetPoint("LEFT", prev, "RIGHT", 6, 0); prev = f.lockDraftBtn end
+  f.closeBtn:ClearAllPoints(); f.closeBtn:SetPoint("LEFT", prev, "RIGHT", 6, 0)
   setShown(f.ignoreBtn, admin)
   setShown(f.mathBtn, true)
   setShown(f.allMathBtn, admin)
+  -- auto-rounds toggle: admin only; label + colour show the current state
+  setShown(f.autoBtn, admin)
+  if admin and f.autoBtn then
+    local on = ns.cfg and ns.cfg.bookAutoRounds
+    f.autoBtn:SetText(on and "Auto-rounds: ON" or "Auto-rounds: off")
+    local fs = f.autoBtn:GetFontString()
+    if fs then fs:SetTextColor(on and 0.45 or 0.6, on and 0.9 or 0.6, on and 0.45 or 0.6) end
+    fitBtn(f.autoBtn)
+  end
 
   -- delegated-admin status + picker
   local desig = ns.db and ns.db.designatedAdmin
   f.adminStatus:SetText("AGNB admin: " .. (desig or "(leaders only)")); setShown(f.adminStatus, true)
   local canAppoint = ns.Book.CanAppoint and ns.Book.CanAppoint()
   setShown(f.adminDD, canAppoint); setShown(f.setAdminBtn, canAppoint); setShown(f.clearAdminBtn, canAppoint)
+  setShown(f.adminPickLabel, canAppoint)
   if canAppoint then
     UIDropDownMenu_Initialize(f.adminDD, function()
       local n = (GetNumGroupMembers and GetNumGroupMembers()) or 0
@@ -303,9 +340,17 @@ function BUI.Refresh()
 
   -- round section
   if r then
-    f.state:SetText(("Round: %s  ·  O/U line %.1f  ·  stakes %dg / %dg")
-      :format(r.state, r.line, r.stakeOU, r.stakeFB))
     local open = r.state == "OPEN"
+    -- a clear, plain-language status line: what's happening + what to do.
+    local status
+    if open then
+      status = ("|cff66ff66Betting OPEN|r \226\128\148 place your bets below.   O/U %.1f \194\183 stakes %dg / %dg"):format(r.line, r.stakeOU, r.stakeFB)
+    elseif r.state == "LOCKED" then
+      status = "|cffffcc44Pull in progress|r \226\128\148 bets are locked."
+    else
+      status = "|cff888888Pull over|r \226\128\148 results below; settle at Close book."
+    end
+    f.state:SetText(status)
     -- one bet per round: once placed, hide the buttons and show the locked pick.
     local ouBet = r.myOU and r.myOU.pick
     if ouBet then
@@ -318,6 +363,7 @@ function BUI.Refresh()
       BUI._popupShownFor = r.id
       BUI.ShowHotSeatPopup()
     end
+    setShown(f.betHeader, open)
     setShown(f.ouLabel, true)
     setShown(f.overBtn, open and not ouBet); setShown(f.underBtn, open and not ouBet)
     setShown(f.fbLabel, open); setShown(f.fbDD, open and not r.myFB)
@@ -343,7 +389,9 @@ function BUI.Refresh()
       setShown(f.hsLabel, false); setShown(f.hsSurvBtn, false); setShown(f.hsDiesBtn, false)
     end
   else
-    f.state:SetText("No betting round yet." .. (admin and " (Open one above.)" or " Waiting for the raid leader."))
+    f.state:SetText("|cff888888No round open.|r " .. (admin
+      and "Open one above, or it auto-opens on ready check." or "Waiting for the raid leader to open betting."))
+    setShown(f.betHeader, false)
     f.ouLabel:SetText(""); setShown(f.overBtn, false); setShown(f.underBtn, false)
     setShown(f.fbLabel, false); setShown(f.fbDD, false)
     setShown(f.hsLabel, false); setShown(f.hsSurvBtn, false); setShown(f.hsDiesBtn, false)
@@ -493,12 +541,12 @@ function BUI.Refresh()
   -- It REPLACES the betting controls (rather than overlaying them, which collided)
   -- so the admin sees only the who-pays-whom / what's-paid report while it's open.
   local adminView = BUI.showAllMath and admin and ns.Settlement
-  if f.allMathBtn then f.allMathBtn:SetText(adminView and "Back to betting" or "Book Admin") end
+  if f.allMathBtn then f.allMathBtn:SetText(adminView and "Back to betting" or "Book Admin"); fitBtn(f.allMathBtn) end
   -- betting-view widgets, hidden while the admin report is up so nothing overlaps it
-  local bettingWidgets = { f.state, f.openBtn, f.draftBtn, f.lockDraftBtn, f.closeBtn,
+  local bettingWidgets = { f.state, f.betHeader, f.openBtn, f.draftBtn, f.rhsOpenBtn, f.lockDraftBtn, f.closeBtn,
     f.ouLabel, f.overBtn, f.underBtn, f.fbLabel, f.fbDD, f.hsLabel, f.hsSurvBtn, f.hsDiesBtn,
-    f.body, f.mathBtn, f.ignoreBtn, f.inviteBtn, f.adminStatus, f.adminDD, f.setAdminBtn,
-    f.clearAdminBtn }
+    f.body, f.mathBtn, f.ignoreBtn, f.autoBtn, f.inviteBtn, f.adminStatus, f.adminDD, f.setAdminBtn,
+    f.clearAdminBtn, f.adminPickLabel }
   if adminView then
     for _, w in ipairs(bettingWidgets) do setShown(w, false) end
     setShown(f.joinBtn, false)
@@ -510,8 +558,8 @@ function BUI.Refresh()
     f.mathChild:SetHeight((f.mathText:GetStringHeight() or 10) + 12)
     f.mathPane:Show(); f.body:Hide()
   else
-    -- restore the toggle to the left button stack above "Show math"
-    f.allMathBtn:ClearAllPoints(); f.allMathBtn:SetPoint("BOTTOMLEFT", f.mathBtn, "TOPLEFT", 0, 6)
+    -- restore the toggle to the admin tools row (the rest of the row chains off it)
+    f.allMathBtn:ClearAllPoints(); f.allMathBtn:SetPoint("TOPLEFT", 14, -88)
     f.mathPane:Hide(); f.body:Show()
     f.body:SetText(table.concat(lines, "\n"))
     setShown(f.joinBtn, dr and dr.state == "OPEN")

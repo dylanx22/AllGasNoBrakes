@@ -48,6 +48,7 @@ CFG.DEFAULTS = {
   bookDraftAnte = 10,
   bookMaxBetPct = 50,          -- USER bankroll cap (% of gold); 0 = no cap
   bookAutoOpenOnReadyCheck = true,
+  bookAutoRounds = false,      -- opt-in: auto-open a new round between pulls (admin turns it on)
   bookLineWindow = 5,          -- pulls of history used for the auto O/U line
   bookStakeHS = 5,             -- Hot Seat underdog base stake (gold, admin)
   bookStakeRHS = 5,            -- Raid Hot Seat flat stake (gold, admin)
@@ -105,7 +106,12 @@ local function handleSlash(msg)
       if arg1 == "clear" then if ns.Book.ClearAdmin then ns.Book.ClearAdmin() end
       elseif arg1 ~= "" then if ns.Book.SetAdmin then ns.Book.SetAdmin(arg1) end
       else ns.Print("Usage: /agnb book admin <name> | /agnb book admin clear") end
-    else if ns.BookUI then ns.BookUI.Toggle() end end
+    else
+      -- open the main window to the Book tab. The Book layout is sized for the embedded
+      -- host (single-window UI); the old standalone frame's native 380x360 can't fit it.
+      if ns.UI and ns.UI.Build then ns.UI.Build(); ns.UI.frame:Show(); ns.UI.SetView("book")
+      elseif ns.BookUI then ns.BookUI.Toggle() end
+    end
   elseif sub == "mock" then
     if rest:match("off") then ns.Demo.Clear() else ns.Demo.Load() end
   elseif sub == "phasedebug" then
@@ -113,6 +119,15 @@ local function handleSlash(msg)
   elseif sub == "void" then
     local removed, pull = ns.DB.VoidLastPull(ns.db.store, ns.Tracking.raidId)
     ns.Print(("Voided pull %d (%d death%s)."):format(pull, removed, removed == 1 and "" or "s"))
+    if ns.UI then ns.UI.Refresh() end
+  elseif sub == "pug" then
+    -- tag the current raid as a pug: keep tracking it tonight, but leave it out of All-Time.
+    local store, raidId = ns.db.store, ns.Tracking and ns.Tracking.raidId
+    if not (store and raidId and store.raids and store.raids[raidId]) then ns.Print("No current raid to tag.") return end
+    local newFlag = not store.raids[raidId].excludeAllTime
+    ns.DB.SetRaidExcluded(store, raidId, newFlag)
+    ns.Print(newFlag and "This raid is now a PUG -- excluded from All-Time stats."
+      or "This raid is back IN All-Time stats.")
     if ns.UI then ns.UI.Refresh() end
   elseif sub == "config" or sub == "options" then
     -- Settings is embedded in the main window now; route to the in-window view.
@@ -197,7 +212,7 @@ CFG.USER_FACING_KEYS = {
   "wipeBannerEnabled", "wipeBannerSound", "wipeBannerStyle", "wipeBannerSeconds",
   "wipeTagline", "autoSummaryOnFinalBoss",
   -- gold & the book
-  "antiPrizeOptIn", "buyIn", "bookEnabled", "bookAutoOpenOnReadyCheck",
+  "antiPrizeOptIn", "buyIn", "bookEnabled", "bookAutoOpenOnReadyCheck", "bookAutoRounds",
   "collusionWatch", "bookStakeOU", "bookStakeFB", "bookDraftAnte",
   "bookMaxBetPct", "bookLineWindow", "bookStakeHS", "bookStakeRHS",
   -- advanced
@@ -248,6 +263,7 @@ CFG.SETTINGS_LAYOUT = {
     { header = "Wagering", controls = {
       { kind = "check", key = "bookEnabled",             label = "Enable wagering (Over/Under, First Blood, Draft)", help = "bookEnabled" },
       { kind = "check", key = "bookAutoOpenOnReadyCheck", label = "Auto-open a betting round on ready check", help = "bookAutoOpenOnReadyCheck", admin = true },
+      { kind = "check", key = "bookAutoRounds", label = "Auto-open a new round between pulls", help = "bookAutoRounds", admin = true },
       { kind = "check", key = "collusionWatch",          label = "Flag suspicious bet-fixing chatter to the admin", help = "collusionWatch", admin = true },
       { kind = "edit",  key = "bookStakeOU",   label = "Over/Under stake (gold)", numeric = true, help = "bookStakeOU", admin = true },
       { kind = "edit",  key = "bookStakeFB",   label = "First Blood stake (gold)", numeric = true, help = "bookStakeFB", admin = true },

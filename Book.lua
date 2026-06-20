@@ -364,7 +364,10 @@ function B.MatchHotSeat(orders, outcomes, lines, base)
     local t = byTarget[target]
     local stk = B.HotSeatStakes(lines[target] or 0.5, base)
     local outcome = outcomes[target]
-    local nPair = math.min(#t.dies, #t.survives)
+    -- only pair bettors when the outcome actually resolved to dies/survives; an unknown or
+    -- missing outcome would otherwise fall to the else-branch below and silently pay the
+    -- "survives" side. Leave both sides unmatched (no payout) instead of mis-settling.
+    local nPair = (outcome == "dies" or outcome == "survives") and math.min(#t.dies, #t.survives) or 0
     for i = 1, nPair do
       local diesP, survP = t.dies[i], t.survives[i]
       -- stake per side from favSide

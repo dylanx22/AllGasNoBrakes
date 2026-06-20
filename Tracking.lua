@@ -6,8 +6,8 @@ local TR = ns.Tracking
 -- ----- pure: damage buffer -----
 function TR.NewBuffer() return {} end
 
-function TR.RecordDamage(buf, dest, source, spell, time)
-  buf[dest] = { source = source, spell = spell, time = time }
+function TR.RecordDamage(buf, dest, source, spell, time, isEnv)
+  buf[dest] = { source = source, spell = spell, time = time, isEnv = isEnv or nil }
 end
 
 function TR.LastHit(buf, dest) return buf[dest] end
@@ -28,13 +28,13 @@ local ENV = { FALLING="Fall", DROWNING="Drowning", FATIGUE="Fatigue",
               FIRE="Fire", LAVA="Lava", SLIME="Slime" }
 
 -- ----- pure: parse a normalized combat-log row into a partial death record -----
+-- Only UNIT_DIED is a death. ENVIRONMENTAL_DAMAGE is NOT -- it fires whenever a player
+-- TAKES fall/lava/fire damage (surviving a fall would otherwise log a phantom death). The
+-- env cause is buffered as a last-hit (see OnCombatLog) and attached when UNIT_DIED fires.
 function TR.ParseDeath(info)
   if not info or not info.destIsPlayer then return nil end
   if info.subevent == "UNIT_DIED" then
     return { player = info.destName, isEnv = false }
-  elseif info.subevent == "ENVIRONMENTAL_DAMAGE" then
-    return { player = info.destName, isEnv = true,
-             envType = ENV[info.envType] or info.envType, ability = ENV[info.envType] or info.envType }
   end
   return nil
 end
@@ -104,6 +104,47 @@ local PROCESSED = {
   UNIT_DIED = true, ENVIRONMENTAL_DAMAGE = true,
 }
 
+-- Resolve a spellId to a readable name (modern C_Spell, then legacy GetSpellInfo). Never
+-- returns a bare number -- a death's ability MUST be a string, or the leaderboard's
+-- cause/source maps mix number+string keys and crash their tie-break (DB topKey()). Falls
+-- back to "Spell <id>" so an unresolved spell still reads as a spell, not a random number.
+local function resolveSpellName(spellId)
+  local id = tonumber(spellId)
+  if not id then return "Unknown" end
+  if C_Spell and C_Spell.GetSpellInfo then
+    local info = C_Spell.GetSpellInfo(id)
+    if type(info) == "table" and type(info.name) == "string" and info.name ~= "" then return info.name end
+  end
+  if GetSpellInfo then
+    local n = GetSpellInfo(id)
+    if type(n) == "string" and n ~= "" then return n end
+  end
+  return "Spell " .. id
+end
+
+-- One-time-ish cleanup: re-resolve deaths whose ability was saved as a bare number (an
+-- earlier build stored the combat-log NAME slot, which was sometimes a number, not the spell
+-- name). Resolve via the spell API where the id is real; otherwise "Unknown" -- the real
+-- spellId is unrecoverable for the bogus ones, so never leave a raw number on the board.
+-- Idempotent: once abilities are names this finds nothing to change.
+function TR.ResolveStoredSpells(store)
+  local changed = 0
+  for _, raid in pairs((store and store.raids) or {}) do
+    for _, d in ipairs(raid.deaths or {}) do
+      local ab = d.ability
+      local numeric = (type(ab) == "number") or (type(ab) == "string" and ab:match("^%-?%d+$"))
+      if numeric then
+        local id = tonumber(ab)
+        local name = (id and id > 0) and resolveSpellName(id) or "Unknown"
+        if id and name == ("Spell " .. id) then name = "Unknown" end  -- bogus id: don't fake it
+        if name ~= ab then d.ability = name; changed = changed + 1 end
+      end
+    end
+  end
+  if changed > 0 and ns.DB and ns.DB.RebuildAllTime then ns.DB.RebuildAllTime(store) end
+  return changed
+end
+
 -- Pure: normalize the combat-log vararg tuple into the `info` table OnCombatLog
 -- consumes, or nil for subevents we don't track. Taking the params directly (instead
 -- of packing CombatLogGetCurrentEventInfo() into a table) and early-bailing BEFORE
@@ -118,13 +159,15 @@ function TR.ReadEvent(ts, se, _hideCaster, _srcGUID, srcName, srcFlags,
                       _srcRaidFlags, _destGUID, destName, destFlags, _destRaidFlags,
                       p12, p13, p14, p15)
   if not PROCESSED[se] then return nil, ts end
-  -- spellName (p13) is normally a string, but some Anniversary-client events hand back
-  -- a numeric spellId here. Resolve it to a name when we can, else stringify -- a death's
-  -- ability MUST be a string so the leaderboard's cause/source maps never mix number and
-  -- string keys (which crashes their tie-break compare). See DB topKey() in Database.lua.
-  local spell = p13
-  if type(spell) == "number" then
-    spell = (GetSpellInfo and GetSpellInfo(spell)) or tostring(spell)
+  -- Spell NAME: p13 is the name slot, p12 the spellId. On the Anniversary client the name
+  -- slot sometimes comes back as a NUMBER (or empty) -- that number is NOT the spellId, so
+  -- resolve the real name from the spellId (p12), not the bogus name-slot value. SWING has
+  -- no spell ("Melee"); UNIT_DIED / ENVIRONMENTAL_DAMAGE carry no spell here.
+  local spell
+  if se == "SWING_DAMAGE" then
+    spell = "Melee"
+  elseif se ~= "UNIT_DIED" and se ~= "ENVIRONMENTAL_DAMAGE" then
+    spell = (type(p13) == "string" and p13 ~= "" and p13) or resolveSpellName(p12)
   end
   local info = {
     subevent = se,
@@ -215,6 +258,19 @@ function TR.OnCombatLog()
       { t = ts, kind = "cast", source = info.sourceName, spell = info.spell or "?" })
     return
   end
+  if se == "ENVIRONMENTAL_DAMAGE" then
+    -- env damage (fall/lava/fire) is NOT a death -- it fires on every hit taken. Record it
+    -- as the last-hit cause so a lethal one is attributed when UNIT_DIED fires; never a death.
+    if info.destName then
+      local envName = ENV[info.envType] or info.envType or "Environment"
+      TR.RecordDamage(TR.buffer, info.destName, "Environment", envName, ts, true)
+      if info.destIsPlayer and TR.killcam then
+        ns.Killcam.Record(TR.killcam, info.destName,
+          { t = ts, kind = "dmg", source = "Environment", spell = envName, amount = info.amount })
+      end
+    end
+    return
+  end
 
   local partial = TR.ParseDeath(info)
   if not partial then return end
@@ -232,10 +288,10 @@ function TR.OnCombatLog()
   local death = {
     player = partial.player,
     time = ts,
-    isEnv = partial.isEnv,
-    envType = partial.envType,
-    ability = partial.ability or (lastHit and lastHit.spell) or "Unknown",
-    sourceName = lastHit and lastHit.source or partial.envType or "Unknown",
+    isEnv = (lastHit and lastHit.isEnv) or false,
+    envType = (lastHit and lastHit.isEnv) and lastHit.spell or nil,
+    ability = (lastHit and lastHit.spell) or "Unknown",
+    sourceName = (lastHit and lastHit.source) or "Unknown",
     boss = ns.Tracking.currentBoss,
     encounterID = ns.PhaseTracker and ns.PhaseTracker.currentEncounterID or nil,
     phaseIndex = (ns.PhaseTracker and ns.PhaseTracker.currentPhaseIndex) or 1,
@@ -246,7 +302,7 @@ function TR.OnCombatLog()
     killcam = ns.Killcam.Snapshot(TR.killcam, partial.player, ts),
   }
 
-  if ns.DB.RecordDeath(ns.db.store, TR.raidId, death) then
+  if ns.DB.RecordDeath(ns.db.store, TR.raidId, death, (GetTime and GetTime()) or nil) then
     if TR.pull then TR.pull.died[death.player] = true end
     ns.Log("debug", "death: " .. tostring(death.player) .. " <- " .. tostring(death.ability) .. " [" .. tostring(death.classification) .. "]")
     local raid = ns.db.store.raids[TR.raidId]
@@ -285,6 +341,9 @@ end
 
 ns.OnInit(function()
   ns.db.store = ns.db.store or ns.DB.NewStore()
+  ns.DB.Dedupe(ns.db.store)              -- collapse duplicate deaths earlier builds accumulated
+  ns.DB.PurgeLegacyEnvDeaths(ns.db.store) -- drop phantom fall/lava "deaths" from the old bug
+  TR.ResolveStoredSpells(ns.db.store)    -- turn old bare-number abilities into names/Unknown
   TR.StartSession()
   local f = CreateFrame("Frame")
   f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")

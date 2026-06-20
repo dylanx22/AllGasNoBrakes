@@ -97,6 +97,19 @@ function SY.BroadcastSummary()
   C_ChatInfo.SendAddonMessage(SY.PREFIX, "SS|", chan)
 end
 
+-- ----- addon presence / version (for the Raid Info view) -----
+-- Each client announces its version; everyone records peers' versions. Announcing on
+-- roster change means a joiner and the existing raid learn each other within a few seconds.
+SY.peerVersions = SY.peerVersions or {}   -- short name -> { version = "1.2.0", time = GetTime }
+local lastVerAnnounce = 0
+function SY.AnnounceVersion()
+  local chan = SY.Channel(); if not (chan and C_ChatInfo) then return end
+  local now = (GetTime and GetTime()) or 0
+  if now - lastVerAnnounce < 8 then return end   -- throttle a roster-update storm
+  lastVerAnnounce = now
+  C_ChatInfo.SendAddonMessage(SY.PREFIX, "VER|" .. (ns.version or "?"), chan)
+end
+
 -- ----- mid-raid catch-up: a joiner asks for state, the broadcaster resends recent deaths -----
 -- Reuses the normal death wire format + RecordDeath de-dup, so no new parser/chunking is
 -- needed. Both sides throttle, and only the authoritative broadcaster answers, so the
@@ -105,7 +118,13 @@ local lastSnapshot, lastRequest = 0, 0
 
 -- `requester` (short name) is whispered the snapshot directly so the rest of the raid
 -- doesn't receive a redundant burst; falls back to the group channel if it's missing.
+-- TEMPORARILY DISABLED: re-sending stored deaths carries each broadcaster's LOCAL clock,
+-- and players' PC clocks can be skewed by seconds, so a re-injected copy lands far enough
+-- from the original that no time-window dedup catches it -> duplicate death-log rows. Needs
+-- a clock-independent identity (leader-authoritative log / stable death id) before it can
+-- come back. Until then both ends no-op so reloads stop spawning duplicates.
 function SY.SendSnapshot(requester)
+  do return end
   if not (SY.AmBroadcaster() and C_ChatInfo) then return end
   local now = (GetTime and GetTime()) or 0
   if now - lastSnapshot < 15 then return end   -- at most one snapshot / 15s
@@ -126,6 +145,7 @@ function SY.SendSnapshot(requester)
 end
 
 function SY.RequestState()
+  do return end   -- disabled with SendSnapshot above (clock-skew duplicates)
   local chan = SY.Channel(); if not (chan and C_ChatInfo) then return end
   local now = (GetTime and GetTime()) or 0
   if now - lastRequest < 30 then return end    -- at most one request / 30s
@@ -139,15 +159,24 @@ ns.OnInit(function()
   end
   local f = CreateFrame("Frame")
   f:RegisterEvent("CHAT_MSG_ADDON")
-  f:RegisterEvent("PLAYER_ENTERING_WORLD")   -- login / zone-in: ask the raid for catch-up state
+  f:RegisterEvent("PLAYER_ENTERING_WORLD")   -- login / zone-in: announce our version
+  f:RegisterEvent("GROUP_ROSTER_UPDATE")     -- someone joined/left: re-announce versions
   f:SetScript("OnEvent", ns.Debug.Guard("Sync.OnEvent", function(_, event, prefix, msg, _, sender)
     if event == "PLAYER_ENTERING_WORLD" then
-      if C_Timer and C_Timer.After then C_Timer.After(4, SY.RequestState) end
+      if C_Timer and C_Timer.After then C_Timer.After(4, SY.AnnounceVersion) end
+      return
+    elseif event == "GROUP_ROSTER_UPDATE" then
+      if C_Timer and C_Timer.After then C_Timer.After(2, SY.AnnounceVersion) end
       return
     end
     if prefix ~= SY.PREFIX then return end
     if sender and ns.MyName and sender:match("^[^-]+") == ns.MyName then return end -- skip own echo
-    if msg:sub(1,5) == "DREQ|" then
+    if msg:sub(1,4) == "VER|" then
+      local who = sender and sender:match("^[^-]+")
+      if who then SY.peerVersions[who] = { version = msg:sub(5), time = (GetTime and GetTime()) or 0 } end
+      if ns.UI and ns.UI.Refresh then ns.UI.Refresh() end
+      return
+    elseif msg:sub(1,5) == "DREQ|" then
       SY.SendSnapshot(msg:sub(6))   -- a joiner asked for state; whisper them recent deaths
       return
     elseif msg:sub(1,3) == "SB|" then
@@ -164,7 +193,9 @@ ns.OnInit(function()
       return
     end
     local death = SY.Decode(msg)
-    if death and ns.DB.RecordDeath(ns.db.store, ns.Tracking.raidId, death) then
+    local store = ns.db and ns.db.store
+    local raidId = ns.Tracking and ns.Tracking.raidId
+    if death and store and raidId and ns.DB.RecordDeath(store, raidId, death, (GetTime and GetTime()) or nil) then
       if ns.UI then ns.UI.Refresh() end
     end
   end))

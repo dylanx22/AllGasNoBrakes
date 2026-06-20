@@ -16,7 +16,7 @@ UI.view  = "deaths"
 
 -- Which views use the scrolling row list, and which honor the Tonight/All-Time
 -- scope (only those that actually change output do).
-local LIST_VIEWS   = { deaths = true, abilities = true, log = true, perboss = true, timeline = true, betting = true }
+local LIST_VIEWS   = { deaths = true, abilities = true, log = true, perboss = true, timeline = true, betting = true, raidinfo = true }
 local SCOPED_VIEWS = { deaths = true, abilities = true, log = true }
 
 local function showListChrome(f, show)
@@ -89,6 +89,48 @@ local function brandName()
     or "All Gas No Brakes"
 end
 
+-- Raid Info rows: every group member with whether they run the addon (+ version), their WoW
+-- role, and who holds the AGNB (Book) admin. Versions come from the version pings (Sync).
+local function raidInfoRows()
+  if ns.Sync and ns.Sync.AnnounceVersion then ns.Sync.AnnounceVersion() end  -- nudge a fresh round
+  local me = ns.MyName or (UnitName and UnitName("player"))
+  local peers = (ns.Sync and ns.Sync.peerVersions) or {}
+  local designated = ns.db and ns.db.designatedAdmin
+  local out = {}
+  local function add(unit, isSelf)
+    local name = UnitName and UnitName(unit)
+    if not name then return end
+    local isLeader = UnitIsGroupLeader and UnitIsGroupLeader(unit) or false
+    local isAssist = UnitIsGroupAssistant and UnitIsGroupAssistant(unit) or false
+    local version = isSelf and ns.version or (peers[name] and peers[name].version)
+    out[#out + 1] = {
+      player = name, isLeader = isLeader, isAssist = isAssist,
+      version = version, hasAddon = version ~= nil,
+      -- the AGNB admin is the appointed delegate if set, otherwise the raid leader.
+      isAdmin = (designated and designated == name) or (not designated and isLeader) or false,
+      online = (not UnitIsConnected) or UnitIsConnected(unit),
+    }
+  end
+  local n = (GetNumGroupMembers and GetNumGroupMembers()) or 0
+  if n == 0 then
+    add("player", true)
+  else
+    local inRaid = IsInRaid and IsInRaid()
+    local prefix = inRaid and "raid" or "party"
+    for i = 1, n do
+      local unit = prefix .. i
+      add(unit, UnitName and UnitName(unit) == me)
+    end
+    if not inRaid then add("player", true) end   -- party units exclude the player
+  end
+  table.sort(out, function(a, b)
+    if a.isAdmin ~= b.isAdmin then return a.isAdmin end
+    if a.hasAddon ~= b.hasAddon then return a.hasAddon end
+    return (a.player or "") < (b.player or "")
+  end)
+  return out
+end
+
 -- ----- post/report shared data (used by the panel and the floating dialog) -----
 local POST_TYPES = {
   { value = "tonight",   label = "Tonight leaderboard" },
@@ -111,7 +153,7 @@ local function navButton(parent, label, onClick)
   local accent = b:CreateTexture(nil, "ARTWORK")
   accent:SetColorTexture(unpack(GOLD)); accent:SetSize(2, 16); accent:SetPoint("LEFT", 0, 0); accent:Hide()
   b.accent = accent
-  b:SetScript("OnClick", onClick)
+  b:SetScript("OnClick", ns.Debug.Guard("nav:" .. tostring(label), onClick))
   return b
 end
 
@@ -121,7 +163,7 @@ local function pillButton(parent, label, onClick)
   local fs = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   fs:SetPoint("CENTER"); fs:SetText(label)
   b.fs = fs
-  b:SetScript("OnClick", onClick)
+  b:SetScript("OnClick", ns.Debug.Guard("pill:" .. tostring(label), onClick))
   return b
 end
 
@@ -147,6 +189,8 @@ local NAV = {
   { label = "Pull Timeline", view = "timeline" },
   { header = "History" },
   { label = "Raid History", view = "history" },
+  { header = "Raid" },
+  { label = "Raid Info",   view = "raidinfo" },
   { header = "Actions" },
   { label = "Post Report", view = "report" },
   { label = "Settings",    view = "settings" },
@@ -318,7 +362,9 @@ function UI.RenderHistory()
       local when = (date and date("%b %d %H:%M", r.startTime)) or tostring(r.startTime)
       local zone = (r.zones and r.zones[1]) or "Unknown"
       local id = r.raidId
-      add(zone .. "  \194\183  " .. when .. "  \194\183  " .. r.bodyCount .. " deaths  \194\183  " .. r.wipeCount .. " wipes",
+      local pug = store and store.raids and store.raids[id] and store.raids[id].excludeAllTime
+      add(zone .. "  \194\183  " .. when .. "  \194\183  " .. r.bodyCount .. " deaths  \194\183  " .. r.wipeCount .. " wipes"
+        .. (pug and "  \194\183  |cff8a7d5a(pug)|r" or ""),
         function() UI.history.raidId = id; UI.history.level = "night"; UI.Refresh() end)
     end
 
@@ -328,6 +374,14 @@ function UI.RenderHistory()
     p.title:SetText(((rep.meta.zones or {})[1]) or "Raid")
     local m = rep.meta
     add("Body count " .. m.bodyCount .. "  \194\183  " .. m.bossCount .. " bosses  \194\183  " .. m.wipeCount .. " wipes")
+    -- pug toggle: keep the raid in History, but in/out of All-Time stats.
+    local rid = UI.history.raidId
+    local excluded = store and store.raids and store.raids[rid] and store.raids[rid].excludeAllTime
+    add(excluded and "|cffd9a566\226\153\166 PUG \226\128\148 excluded from All-Time (click to include)|r"
+      or "Mark as PUG \226\128\148 exclude from All-Time", function()
+      if ns.DB.SetRaidExcluded then ns.DB.SetRaidExcluded(store, rid, not excluded) end
+      UI.Refresh()
+    end)
     local low = rep.lowlights or {}
     if low.feeder then add("Feeder: " .. low.feeder .. " (" .. (low.feederDeaths or 0) .. ")") end
     if low.deadliestAbility then add("Deadliest: " .. low.deadliestAbility .. (low.deadliestSource and (" - " .. low.deadliestSource) or "")) end
@@ -731,6 +785,8 @@ local function rowsForView()
     return rows
   elseif UI.view == "betting" then
     return ns.DB.BetLeaderboard(store)
+  elseif UI.view == "raidinfo" then
+    return raidInfoRows()
   end
   return {}
 end
@@ -776,6 +832,22 @@ local function fillRow(r, i, data, nameW, subW)
     r.sub:SetText(("%dW / %dL"):format(data.w or 0, data.l or 0))
     local net = data.net or 0
     r.ct:SetText((net >= 0 and "+" or "") .. net .. "g")
+  elseif UI.view == "raidinfo" then
+    r.rank:SetText("")
+    r.name:SetText(data.player or ""); r.name:SetTextColor(classColor(data.player))
+    -- role + admin + online (sub column)
+    local role = data.isLeader and "Leader" or (data.isAssist and "Assist" or "")
+    if data.isAdmin then role = (role ~= "" and (role .. " \194\183 ") or "") .. "|cffffd966Book admin|r" end
+    if not data.online then role = (role ~= "" and (role .. " \194\183 ") or "") .. "|cff888888offline|r" end
+    r.sub:SetText(role)
+    -- addon version (count column); green if current, yellow if a different version
+    if data.hasAddon then
+      local outdated = data.version ~= ns.version
+      r.ct:SetText("v" .. tostring(data.version))
+      if outdated then r.ct:SetTextColor(0.95, 0.82, 0.25) else r.ct:SetTextColor(0.45, 0.9, 0.45) end
+    else
+      r.ct:SetText("none"); r.ct:SetTextColor(0.55, 0.42, 0.42)
+    end
   else -- deaths
     r.rank:SetText(i .. ".")
     r.name:SetText(data.player or ""); r.name:SetTextColor(classColor(data.player))
@@ -839,6 +911,9 @@ function UI.Refresh()
   if UI.view == "betting" then
     f.contentTitle:SetText("Bet Records  \194\183  all-time")
   end
+  if UI.view == "raidinfo" then
+    f.contentTitle:SetText("Raid Info  \194\183  who's on the addon")
+  end
   -- in All-Time the spell/mob column is each player's most-common killer, so label
   -- it as a nemesis rather than a single death.
   local deathsSub = (UI.scope == "alltime") and "NEMESIS" or "SPELL \194\183 MOB"
@@ -849,6 +924,7 @@ function UI.Refresh()
     perboss   = { "BOSS / PHASE", "DEADLIEST \194\183 FED", "DEATHS" },
     timeline  = { "PLAYER", "CAUSE", "AT" },
     betting   = { "PLAYER", "W / L", "NET" },
+    raidinfo  = { "PLAYER", "ROLE", "ADDON" },
   }
   local h = heads[UI.view] or heads.deaths
   f.colHead.name:SetText(h[1]); f.colHead.sub:SetText(h[2]); f.colHead.sub:SetWidth(subW)
@@ -877,7 +953,15 @@ function UI.Refresh()
   f.scrollOffset = 0; f.list:SetPoint("TOPLEFT", 0, 0)
 
   local store, raidId = activeData()
-  if UI.scope == "alltime" then
+  if UI.view == "raidinfo" then
+    local withAddon, admin = 0, nil
+    for _, m in ipairs(rows) do
+      if m.hasAddon then withAddon = withAddon + 1 end
+      if m.isAdmin then admin = m.player end
+    end
+    f.footer:SetText(("%d of %d on the addon%s"):format(withAddon, #rows,
+      admin and ("  |  Admin: " .. admin) or "  |  no admin set"))
+  elseif UI.scope == "alltime" then
     local total = 0
     if store then for _, p in pairs(store.allTime) do total = total + (p.deaths or 0) end end
     f.footer:SetText(("All-time body count: %d"):format(total))

@@ -50,6 +50,17 @@ local function genNonce()
     .. ":" .. myName()):sub(1, 16)
 end
 
+-- check the player can afford a stake before locking it in. Defined up here (not just
+-- above the O/U bet) so EVERY Place function can call it -- Raid Hot Seat is defined
+-- earlier in the file, so a later definition left it calling a nil global (bet did
+-- nothing + popup stayed open).
+local function affordable(stake)
+  local gold = (GetMoney and math.floor(GetMoney() / 10000)) or 0
+  local ok, reason = ns.Book.ValidateStake(stake, gold, cfg().bookMaxBetPct or 0)
+  if not ok then ns.Print(reason) end
+  return ok
+end
+
 local function activeStore()
   local demo = ns.Demo and ns.Demo.active
   local store = demo and ns.Demo.store or (ns.db and ns.db.store)
@@ -92,6 +103,30 @@ local function roster()
 end
 
 local function refreshUI() if ns.BookUI and ns.BookUI.Refresh then ns.BookUI.Refresh() end end
+
+-- The Book is a raid feature -- never run it in a 5-man dungeon (those are a "party", not a
+-- raid group). Allow a raid group, a raid instance, or the solo dev sim.
+local function isRaid()
+  if ns.Demo and ns.Demo.active then return true end
+  if IsInRaid and IsInRaid() then return true end
+  if IsInInstance then local _, t = IsInInstance(); if t == "raid" then return true end end
+  return false
+end
+B.IsRaidContext = isRaid
+
+-- Auto-open the next betting round between pulls (admin only). Driven off combat ENDING, so
+-- it fires even when no round was open for the pull just finished -- it doesn't need a ready
+-- check or an existing round to continue from. Skips while in combat (a round opened mid-pull
+-- would never lock/resolve) and when a round is already live.
+local function maybeAutoOpenRound()
+  if not (cfg().bookEnabled and cfg().bookAutoRounds) then return end
+  if not isRaid() then return end          -- raids only, not 5-man dungeons
+  if rt.closed then return end
+  if not B.CanAdmin() then return end
+  if rt.round and rt.round.state ~= "SETTLED" then return end
+  if InCombatLockdown and InCombatLockdown() then return end
+  B.OpenRound()
+end
 
 -- Resolve whether a raid member by name currently holds leader/assist (or is a
 -- dev). Used to validate admin-authoritative messages on receipt so they can't be
@@ -283,6 +318,7 @@ end
 -- ----- Over/Under + First Blood round -----
 function B.OpenRound()
   if not cfg().bookEnabled then ns.Print("Wagering is off (enable it in Settings).") return end
+  if not isRaid() then ns.Print("The Book runs in raids only, not 5-man dungeons.") return end
   if not B.CanAdmin() then ns.Print("Only the raid leader/assist can open a betting round.") return end
   local line = ns.Book.AutoLine(rt.history, cfg().bookLineFallback or 0.5)
   local id = tostring((GetTime and math.floor(GetTime() * 1000)) or math.random(1, 1e9))
@@ -321,6 +357,32 @@ function B.OpenRound()
   end
 end
 
+-- One-click opt-in: wagering is off by default per character, so a player who hasn't
+-- enabled it gets the round but no bet popup. When an admin opens betting, nudge them
+-- once per session to enable it instead of digging through Settings.
+if StaticPopupDialogs then
+  StaticPopupDialogs["AGNB_BOOK_OPTIN"] = {
+    text = "Your raid is running The Book (death betting).\nEnable wagering so you can place bets?",
+    button1 = "Enable", button2 = "No thanks",
+    OnAccept = function()
+      if ns.cfg then ns.cfg.bookEnabled = true end
+      refreshUI()
+      if ns.BookUI then
+        if ns.BookUI.ShowHotSeatPopup then ns.BookUI.ShowHotSeatPopup() end
+        if ns.BookUI.ShowRaidHotSeatPopup then ns.BookUI.ShowRaidHotSeatPopup() end
+      end
+    end,
+    timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
+  }
+end
+
+local function maybePromptOptIn()
+  if cfg().bookEnabled then return end          -- already in
+  if rt._optInPrompted then return end          -- once per session, no nagging
+  rt._optInPrompted = true
+  if StaticPopup_Show then StaticPopup_Show("AGNB_BOOK_OPTIN") end
+end
+
 function B.OnOpen(id, line, stakeOU, stakeFB)
   -- Don't clobber a live round: re-applying the SAME id is an idempotent no-op (keeps
   -- commits already received), and a DIFFERENT id while a round is still in progress is
@@ -342,6 +404,7 @@ function B.OnOpen(id, line, stakeOU, stakeFB)
     local p = rt._pendingHS; rt._pendingHS = nil
     B.OnOpenHotSeat(p.id, p.seed, p.sHS, p.payload)
   end
+  maybePromptOptIn()
   refreshUI()
 end
 
@@ -386,6 +449,7 @@ end
 -- first pull.
 function B.OpenRaidHotSeat(subjectOverride, lineOverride)
   if not cfg().bookEnabled then ns.Print("Wagering is off (enable it in Settings).") return end
+  if not isRaid() then ns.Print("The Book runs in raids only, not 5-man dungeons.") return end
   if not B.CanAdmin() then ns.Print("Only the raid leader/assist can open the Raid Hot Seat.") return end
   if rt.raidHS and rt.raidHS.state ~= "SETTLED" then ns.Print("A Raid Hot Seat is already running.") return end
   local currentRoster = roster()
@@ -538,14 +602,6 @@ function B.ResolveAndSettleRaidHS(closeTime, outcomeOverride, countOverride)
   refreshUI()
 end
 
--- check the player can afford a stake before locking it in
-local function affordable(stake)
-  local gold = (GetMoney and math.floor(GetMoney() / 10000)) or 0
-  local ok, reason = ns.Book.ValidateStake(stake, gold, cfg().bookMaxBetPct or 0)
-  if not ok then ns.Print(reason) end
-  return ok
-end
-
 -- place / change a hidden Over-Under bet ("over"/"under") while OPEN
 function B.PlaceOU(pick)
   local rd = rt.round
@@ -682,7 +738,10 @@ local function resolveRound()
     send(("BRES|%s|%s|%d|%s|%s"):format(rd.id, tostring(rd.outcomeOU), counted,
       tostring(rd.outcomeFB), table.concat(hsParts, ",")))
   end
-  if C_Timer and C_Timer.After then C_Timer.After(6, B.Settle) else B.Settle() end
+  -- guard the timer callback: WoW swallows errors in C_Timer callbacks, so an error in Settle
+  -- would silently strand the round in RESOLVED with no ledger entry.
+  local settle = ns.Debug.Guard("Book.Settle", B.Settle)
+  if C_Timer and C_Timer.After then C_Timer.After(6, settle) else settle() end
   refreshUI()
 end
 
@@ -692,13 +751,15 @@ end
 function B.OnResolveBroadcast(id, ouOutcome, ouCount, fbOutcome, hsPayload)
   local rd = rt.round
   if not (rd and rd.id == id and rd.state == "RESOLVED") then return end
-  rd.outcomeOU = ouOutcome
+  -- validate before overriding, so a truncated/garbled BRES can't blank a correctly-resolved
+  -- local outcome (defends against malformed / mixed-version wire payloads).
+  if ouOutcome == "over" or ouOutcome == "under" or ouOutcome == "push" then rd.outcomeOU = ouOutcome end
   rd.counted = tonumber(ouCount) or rd.counted
-  rd.outcomeFB = fbOutcome
+  if fbOutcome and fbOutcome ~= "" then rd.outcomeFB = fbOutcome end
   if rd.hs and hsPayload and hsPayload ~= "" then
     for entry in hsPayload:gmatch("[^,]+") do
       local t, o = entry:match("^([^=]+)=(.+)$")
-      if t and o then rd.hs.outcomes[t] = o end
+      if t and (o == "dies" or o == "survives") then rd.hs.outcomes[t] = o end
     end
   end
   refreshUI()
@@ -977,7 +1038,7 @@ ns.OnInit(function()
       local text, playerName = ...
       B.OnWhisper(text, playerName and playerName:match("^[^-]+") or playerName)
     elseif event == "READY_CHECK" then
-      if cfg().bookEnabled and cfg().bookAutoOpenOnReadyCheck and B.CanAdmin() and not rt.round then
+      if cfg().bookEnabled and cfg().bookAutoOpenOnReadyCheck and isRaid() and B.CanAdmin() and not rt.round then
         B.OpenRound()
       end
     elseif event == "ENCOUNTER_START" or event == "PLAYER_REGEN_DISABLED" then
@@ -985,6 +1046,11 @@ ns.OnInit(function()
       lockRaidHS()
     elseif event == "ENCOUNTER_END" or event == "PLAYER_REGEN_ENABLED" then
       resolveRound()
+      -- between pulls: open the next round once any just-resolved round has settled (+6s)
+      -- and we're back out of combat. Reopens the chain without needing a ready check.
+      -- Guarded: a timer callback's error is swallowed by WoW (resolveRound above is already
+      -- covered by the OnEvent guard).
+      ns.After(8, ns.Debug.Guard("Book.autoOpen", maybeAutoOpenRound))
     end
   end))
 end)

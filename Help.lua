@@ -42,6 +42,7 @@ H.SETTING = {
   buyIn              = "Gold owed per counted death (ledger only).",
   bookEnabled        = "Turn on wagering: Over/Under, First Blood, and the Death Draft.",
   bookAutoOpenOnReadyCheck = "Open a betting round automatically when a ready check starts.",
+  bookAutoRounds     = "Automatically open a new betting round between pulls (a couple seconds after the last one settles), so betting is ready without anyone clicking.",
   collusionWatch     = "Flag suspicious bet-fixing chatter to the raid leader.",
   bookStakeOU        = "Flat stake for Over/Under bets (set by the raid leader running the book).",
   bookStakeFB        = "Flat stake for First Blood bets (raid-leader set).",

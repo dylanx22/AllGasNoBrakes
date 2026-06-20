@@ -3,10 +3,31 @@ ns = ns or __AGNB_NS
 ns.DB = ns.DB or {}
 local DB = ns.DB
 
--- Session-only de-dup index (NOT persisted): each raid table -> { "player\0time" = true }.
+-- Session-only de-dup index (NOT persisted): each raid table -> { "player\0second" = true }.
 -- Weak keys so when a raid/store is dropped (e.g. demo cleared) its index is freed too.
 local seenIndex = setmetatable({}, { __mode = "k" })
-local function deathKey(d) return (d.player or "?") .. "\0" .. tostring(d.time) end
+-- Receipt-time index (also session-only): raid -> { player = { t = LOCAL time, d = death } }.
+-- The death's stored timestamp is the recording client's clock, and PC clocks are skewed, so
+-- a synced copy's stamp can land seconds from the local copy's -- past any time window. But
+-- both copies of one death ARRIVE at this client within a couple seconds of each other, so we
+-- also dedup by LOCAL receipt time (immune to clock skew). RECV_WINDOW < the fastest possible
+-- re-death (battle-rez) so it never merges two real deaths.
+local recvIndex = setmetatable({}, { __mode = "k" })
+local RECV_WINDOW = 5
+-- Dedup the same death seen from different sources (own combat log, a synced copy from
+-- another broadcaster, a catch-up snapshot after /reload). Those copies carry timestamps
+-- that differ by sub-second up to ~1s and can STRADDLE a second boundary, so a single
+-- whole-second key still let some through. Mark/check a +-1 second window instead. A player
+-- can't die twice within ~2s, so this window never merges genuinely distinct deaths.
+local function deathSec(d) return math.floor((d.time or 0)) end
+local function markSeen(seen, player, sec)
+  seen[player .. "\0" .. (sec - 1)] = true
+  seen[player .. "\0" .. sec] = true
+  seen[player .. "\0" .. (sec + 1)] = true
+end
+local function isSeen(seen, player, sec)
+  return seen[player .. "\0" .. (sec - 1)] or seen[player .. "\0" .. sec] or seen[player .. "\0" .. (sec + 1)]
+end
 
 function DB.NewStore()
   return { allTime = {}, raids = {}, settings = {}, bets = {} }
@@ -74,22 +95,36 @@ local function applyAllTime(store, death)
   end
 end
 
--- Returns true if recorded, false if a duplicate (same player+time) already exists.
-function DB.RecordDeath(store, raidId, death)
+-- Returns true if recorded, false if it's a duplicate. `now` (optional, GetTime() from the
+-- caller) enables the clock-skew-proof receipt-time dedup; without it only the timestamp
+-- window applies (used by the headless tests).
+function DB.RecordDeath(store, raidId, death, now)
   local raid = ensureRaid(store, raidId)
   local seen = seenIndex[raid]
   if not seen then
     -- first touch this session: seed from any deaths already loaded from SavedVariables.
     seen = {}
-    for _, d in ipairs(raid.deaths) do seen[deathKey(d)] = true end
+    for _, d in ipairs(raid.deaths) do markSeen(seen, d.player or "?", deathSec(d)) end
     seenIndex[raid] = seen
   end
-  local key = deathKey(death)
-  if seen[key] then return false end
-  seen[key] = true
+  local player, sec = death.player or "?", deathSec(death)
+  if isSeen(seen, player, sec) then return false end
+  -- clock-skew-proof: same player arriving within RECV_WINDOW of LOCAL time is the same death
+  -- from another source; keep whichever copy carries the killcam.
+  local rv
+  if now then
+    rv = recvIndex[raid]; if not rv then rv = {}; recvIndex[raid] = rv end
+    local prev = rv[player]
+    if prev and (now - prev.t) < RECV_WINDOW then
+      if death.killcam and prev.d and not prev.d.killcam then prev.d.killcam = death.killcam end
+      return false
+    end
+  end
+  markSeen(seen, player, sec)
   raid.deaths[#raid.deaths + 1] = death
+  if rv then rv[player] = { t = now, d = death } end
 
-  applyAllTime(store, death)
+  if not raid.excludeAllTime then applyAllTime(store, death) end  -- pug raids skip all-time
   return true
 end
 
@@ -159,6 +194,7 @@ end
 function DB.AbilityBoardAllTime(store)
   local agg = {}
   for _, raid in pairs(store.raids) do
+   if not raid.excludeAllTime then
     for _, d in ipairs(raid.deaths) do
       if d.classification ~= "wipeCascade" and d.ability then
         local a = agg[d.ability]
@@ -168,6 +204,7 @@ function DB.AbilityBoardAllTime(store)
         a.sources[s] = (a.sources[s] or 0) + 1
       end
     end
+   end
   end
   local out = {}
   for ability, a in pairs(agg) do
@@ -194,7 +231,9 @@ function DB.DeathLogAllTime(store, limit)
   for k in pairs(store.raids) do keys[#keys + 1] = k end
   table.sort(keys)
   for _, k in ipairs(keys) do
-    for _, d in ipairs(store.raids[k].deaths) do all[#all + 1] = d end
+    if not store.raids[k].excludeAllTime then
+      for _, d in ipairs(store.raids[k].deaths) do all[#all + 1] = d end
+    end
   end
   local out = {}
   for i = #all, math.max(1, #all - limit + 1), -1 do out[#out + 1] = all[i] end
@@ -243,14 +282,77 @@ function DB.PruneKillcams(store, keepRaidId)
   return stripped
 end
 
--- Recompute all-time aggregates from scratch from every recorded death.
+-- One-time cleanup for data that earlier builds duplicated. Two passes, both order-based
+-- so they survive cross-client CLOCK SKEW (a synced copy carries another PC's clock, which
+-- a time window can't reconcile): drop a death if it's within +-1s of an earlier one for
+-- the same player, OR if it is identical (player+ability+source) to the immediately
+-- preceding kept death -- the duplicates always land consecutively in insertion order.
+-- Rebuilds all-time. Safe to run every load (idempotent).
+local function deathSig(d) return (d.player or "?") .. "\0" .. tostring(d.ability) .. "\0" .. tostring(d.sourceName) end
+function DB.Dedupe(store)
+  local removed = 0
+  for _, raid in pairs((store and store.raids) or {}) do
+    local seen, kept = {}, {}
+    for _, d in ipairs(raid.deaths or {}) do
+      local player, sec = d.player or "?", deathSec(d)
+      local prev = kept[#kept]
+      -- consecutive same-player rows that are either identical (player+ability+source) OR
+      -- differ only in having a killcam (the local copy carries one, the synced copy doesn't)
+      -- are the same death from two sources -- collapse them, keeping the killcam.
+      local prevDup = prev and (prev.player or "?") == player
+        and (deathSig(prev) == deathSig(d) or ((prev.killcam ~= nil) ~= (d.killcam ~= nil)))
+      if isSeen(seen, player, sec) or prevDup then
+        removed = removed + 1
+        if prev and d.killcam and not prev.killcam then prev.killcam = d.killcam end
+      else
+        markSeen(seen, player, sec); kept[#kept + 1] = d
+      end
+    end
+    raid.deaths = kept
+  end
+  if removed > 0 then DB.RebuildAllTime(store) end
+  return removed
+end
+
+-- Remove the phantom environmental "deaths" an earlier build created -- it logged EVERY
+-- fall/lava/fire DAMAGE event as a death (so surviving a fall left a death in the log). The
+-- fixed code records a real env death with sourceName "Environment"; the buggy ones carry a
+-- mob/envType source. So drop isEnv deaths whose source isn't "Environment". Safe to run every
+-- load: legitimately-recorded env deaths are kept. Rebuilds all-time when it changes anything.
+function DB.PurgeLegacyEnvDeaths(store)
+  local removed = 0
+  for _, raid in pairs((store and store.raids) or {}) do
+    local kept = {}
+    for _, d in ipairs(raid.deaths or {}) do
+      if d.isEnv and d.sourceName ~= "Environment" then removed = removed + 1
+      else kept[#kept + 1] = d end
+    end
+    raid.deaths = kept
+  end
+  if removed > 0 then DB.RebuildAllTime(store) end
+  return removed
+end
+
+-- Recompute all-time aggregates from scratch from every recorded death, skipping raids
+-- flagged excludeAllTime (pugs you don't want in your career stats).
 function DB.RebuildAllTime(store)
   store.allTime = {}
   for _, raid in pairs(store.raids) do
-    for _, death in ipairs(raid.deaths) do
-      applyAllTime(store, death)
+    if not raid.excludeAllTime then
+      for _, death in ipairs(raid.deaths) do
+        applyAllTime(store, death)
+      end
     end
   end
+end
+
+-- Mark a raid in/out of all-time (e.g. tag a pug). Recomputes all-time. Returns the new flag.
+function DB.SetRaidExcluded(store, raidId, excluded)
+  local raid = store and store.raids and store.raids[raidId]
+  if not raid then return nil end
+  raid.excludeAllTime = excluded or nil
+  DB.RebuildAllTime(store)
+  return raid.excludeAllTime == true
 end
 
 -- Remove the most-recent pull's deaths from a raid and rebuild all-time.
