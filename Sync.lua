@@ -51,8 +51,21 @@ function SY.Channel()
   return nil
 end
 
+-- Only the authoritative broadcaster (raid leader / assist, or an unlocked dev) syncs
+-- deaths, so a death goes on the wire ONCE instead of being rebroadcast by every client
+-- that saw it (which made wipe traffic O(raiders^2)). Non-broadcasters still record their
+-- own local combat-log observations; they just don't put copies on the wire.
+function SY.AmBroadcaster()
+  local isL = UnitIsGroupLeader and UnitIsGroupLeader("player") or false
+  local isA = UnitIsGroupAssistant and UnitIsGroupAssistant("player") or false
+  local name = UnitName and UnitName("player") or nil
+  local tag; if BNGetInfo then local _, bt = BNGetInfo(); tag = bt end
+  return ns.Summary and ns.Summary.CanBroadcast(isL, isA, name, tag) or false
+end
+
 function SY.Broadcast(death)
   if not (ns.cfg and ns.cfg.syncEnabled ~= false) then return end
+  if not SY.AmBroadcaster() then return end
   local chan = SY.Channel()
   if not chan or not C_ChatInfo then return end
   C_ChatInfo.SendAddonMessage(SY.PREFIX, SY.Encode(death), chan)
@@ -84,16 +97,60 @@ function SY.BroadcastSummary()
   C_ChatInfo.SendAddonMessage(SY.PREFIX, "SS|", chan)
 end
 
+-- ----- mid-raid catch-up: a joiner asks for state, the broadcaster resends recent deaths -----
+-- Reuses the normal death wire format + RecordDeath de-dup, so no new parser/chunking is
+-- needed. Both sides throttle, and only the authoritative broadcaster answers, so the
+-- whole exchange is one request + a bounded burst of recent deaths.
+local lastSnapshot, lastRequest = 0, 0
+
+-- `requester` (short name) is whispered the snapshot directly so the rest of the raid
+-- doesn't receive a redundant burst; falls back to the group channel if it's missing.
+function SY.SendSnapshot(requester)
+  if not (SY.AmBroadcaster() and C_ChatInfo) then return end
+  local now = (GetTime and GetTime()) or 0
+  if now - lastSnapshot < 15 then return end   -- at most one snapshot / 15s
+  lastSnapshot = now
+  local store = ns.db and ns.db.store
+  local raidId = ns.Tracking and ns.Tracking.raidId
+  local recent = (store and raidId and ns.DB.DeathLog(store, raidId, 40)) or {}
+  local toWhisper = requester and requester ~= ""
+  local chan = (not toWhisper) and SY.Channel() or nil
+  if not toWhisper and not chan then return end
+  for _, d in ipairs(recent) do
+    if toWhisper then
+      C_ChatInfo.SendAddonMessage(SY.PREFIX, SY.Encode(d), "WHISPER", requester)
+    else
+      C_ChatInfo.SendAddonMessage(SY.PREFIX, SY.Encode(d), chan)
+    end
+  end
+end
+
+function SY.RequestState()
+  local chan = SY.Channel(); if not (chan and C_ChatInfo) then return end
+  local now = (GetTime and GetTime()) or 0
+  if now - lastRequest < 30 then return end    -- at most one request / 30s
+  lastRequest = now
+  C_ChatInfo.SendAddonMessage(SY.PREFIX, "DREQ|" .. (ns.MyName or (UnitName and UnitName("player")) or ""), chan)
+end
+
 ns.OnInit(function()
   if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
     C_ChatInfo.RegisterAddonMessagePrefix(SY.PREFIX)
   end
   local f = CreateFrame("Frame")
   f:RegisterEvent("CHAT_MSG_ADDON")
-  f:SetScript("OnEvent", ns.Debug.Guard("Sync.OnEvent", function(_, _, prefix, msg, _, sender)
+  f:RegisterEvent("PLAYER_ENTERING_WORLD")   -- login / zone-in: ask the raid for catch-up state
+  f:SetScript("OnEvent", ns.Debug.Guard("Sync.OnEvent", function(_, event, prefix, msg, _, sender)
+    if event == "PLAYER_ENTERING_WORLD" then
+      if C_Timer and C_Timer.After then C_Timer.After(4, SY.RequestState) end
+      return
+    end
     if prefix ~= SY.PREFIX then return end
     if sender and ns.MyName and sender:match("^[^-]+") == ns.MyName then return end -- skip own echo
-    if msg:sub(1,3) == "SB|" then
+    if msg:sub(1,5) == "DREQ|" then
+      SY.SendSnapshot(msg:sub(6))   -- a joiner asked for state; whisper them recent deaths
+      return
+    elseif msg:sub(1,3) == "SB|" then
       throttledShow("BANNER", unesc(msg:sub(4)))
       return
     elseif msg:sub(1,3) == "SS|" then

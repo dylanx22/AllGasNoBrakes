@@ -173,4 +173,23 @@ do
   T.eq(#sv.raids["rw"].deaths, 1, "one death remains")
   T.eq(sv.allTime["A"], nil, "A rolled out of all-time")
   T.eq(sv.allTime["C"].deaths, 1, "out-of-window death intact")
+  -- after a void, a death reusing a voided (player,time) is accepted again: the de-dup
+  -- index must have been invalidated, not left holding the removed key.
+  T.eq(DB.RecordDeath(sv, "rw", { player = "A", time = 100, ability = "X",
+    isEnv = false, boss = "B", pullId = 2, classification = "counted" }), true,
+    "re-recording a voided death is accepted (index invalidated)")
+end
+
+-- PruneKillcams: strips the heavy killcam timelines from every raid except the one
+-- we keep (the current session), so SavedVariables doesn't accumulate a timeline per
+-- death across a season. Death records + stats are untouched.
+do
+  local sp = DB.NewStore()
+  DB.RecordDeath(sp, "old", { player = "A", time = 1, classification = "counted", killcam = { 1, 2, 3 } })
+  DB.RecordDeath(sp, "cur", { player = "B", time = 2, classification = "counted", killcam = { 4, 5 } })
+  local stripped = DB.PruneKillcams(sp, "cur")
+  T.eq(stripped, 1, "stripped the one old-raid killcam")
+  T.eq(sp.raids["old"].deaths[1].killcam, nil, "old raid killcam dropped")
+  T.ok(sp.raids["cur"].deaths[1].killcam ~= nil, "current raid killcam kept")
+  T.eq(sp.raids["old"].deaths[1].player, "A", "death record itself is untouched")
 end

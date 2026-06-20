@@ -58,6 +58,7 @@ local TESTS = {
   "tests/test_smoke.lua",
   "tests/test_hash.lua",
   "tests/test_book.lua",
+  "tests/test_hotseat.lua",
   "tests/test_book_settle.lua",
   "tests/test_book_guard.lua",
   "tests/test_database.lua",

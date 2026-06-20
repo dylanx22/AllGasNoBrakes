@@ -49,6 +49,9 @@ CFG.DEFAULTS = {
   bookMaxBetPct = 50,          -- USER bankroll cap (% of gold); 0 = no cap
   bookAutoOpenOnReadyCheck = true,
   bookLineWindow = 5,          -- pulls of history used for the auto O/U line
+  bookStakeHS = 5,             -- Hot Seat underdog base stake (gold, admin)
+  bookStakeRHS = 5,            -- Raid Hot Seat flat stake (gold, admin)
+  bookRaidLineFallback = 3.5,  -- Raid Hot Seat line when the subject has no history
   bookLineFallback = 0.5,      -- lowest line when there's no history
   collusionWatch = true,       -- flag suspicious bet-fixing chatter to the admin
 }
@@ -86,6 +89,7 @@ local function handleSlash(msg)
   elseif sub == "book" then
     local arg, arg1, arg2 = rest:match("^(%S*)%s*(%S*)%s*(%S*)")
     if arg == "open" then ns.Book.OpenRound()
+    elseif arg == "raidhs" then if ns.Book.OpenRaidHotSeat then ns.Book.OpenRaidHotSeat() end
     elseif arg == "draft" then ns.Book.OpenDraft()
     elseif arg == "join" then ns.Book.JoinDraft()
     elseif arg == "lock" then ns.Book.LockDraft()
@@ -122,6 +126,22 @@ local function handleSlash(msg)
     if ns.Welcome and ns.Welcome.Show then ns.Welcome.Show() end
   elseif sub == "tour" then
     if ns.Tour and ns.Tour.Start then ns.Tour.Start() end
+  elseif sub == "dev" then
+    -- per-character dev unlock (persists in SavedVariables); replaces the old
+    -- hardcoded dev-name list so the public build ships no backdoor names.
+    local arg = rest:match("^(%S+)")
+    local me = UnitName and UnitName("player") or nil
+    if arg == "on" then
+      ns.db.devUnlocked = true
+      if me and ns.Summary then ns.Summary.DEV_BROADCASTERS[me] = true end
+      ns.Print("Dev tools unlocked for this character.")
+    elseif arg == "off" then
+      ns.db.devUnlocked = nil
+      if me and ns.Summary then ns.Summary.DEV_BROADCASTERS[me] = nil end
+      ns.Print("Dev tools locked for this character.")
+    else
+      ns.Print(("Dev tools are %s. Usage: /agnb dev on | off"):format(ns.db.devUnlocked and "ON" or "off"))
+    end
   else
     ns.Print("commands: /agnb [show | report <tonight|alltime|lowlights|ledger> | summary | ledger | invite | void | config | debug]")
   end
@@ -179,7 +199,7 @@ CFG.USER_FACING_KEYS = {
   -- gold & the book
   "antiPrizeOptIn", "buyIn", "bookEnabled", "bookAutoOpenOnReadyCheck",
   "collusionWatch", "bookStakeOU", "bookStakeFB", "bookDraftAnte",
-  "bookMaxBetPct", "bookLineWindow",
+  "bookMaxBetPct", "bookLineWindow", "bookStakeHS", "bookStakeRHS",
   -- advanced
   "debugLevel",
 }
@@ -234,6 +254,8 @@ CFG.SETTINGS_LAYOUT = {
       { kind = "edit",  key = "bookDraftAnte", label = "Death Draft ante (gold)", numeric = true, help = "bookDraftAnte", admin = true },
       { kind = "edit",  key = "bookMaxBetPct", label = "My bankroll cap (%)", numeric = true, help = "bookMaxBetPct" },
       { kind = "edit",  key = "bookLineWindow", label = "Auto-line history (pulls)", numeric = true, help = "bookLineWindow", admin = true },
+      { kind = "edit",  key = "bookStakeHS",  label = "Hot Seat stake (gold)", numeric = true, help = "bookStakeHS", admin = true },
+      { kind = "edit",  key = "bookStakeRHS", label = "Raid Hot Seat stake (gold)", numeric = true, help = "bookStakeRHS", admin = true },
     } },
   } },
 
@@ -405,6 +427,9 @@ local function buildOptions()
     y = y - 32
     return dd
   end
+  -- per-key numeric bounds (min/max gold); clamped on commit so a stake can't be
+  -- set to an untradeable sub-gold value or an unreasonably large one.
+  local NUMERIC_CLAMP = { bookStakeHS = { min = 1, max = 10 } }
   local function editbox(label, key, numeric, wide, help, parent, adminOnly)
     parent = parent or child
     local lbl = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
@@ -426,7 +451,14 @@ local function buildOptions()
     eb:HookScript("OnShow", seed)
     eb:SetScript("OnEnterPressed", function(self)
       local v = self:GetText()
-      if numeric then ns.cfg[key] = tonumber(v) or ns.cfg[key]; self:SetText(tostring(ns.cfg[key]))
+      if numeric then
+        local n = tonumber(v) or ns.cfg[key]
+        local cl = NUMERIC_CLAMP[key]
+        if cl and n then
+          if cl.min and n < cl.min then n = cl.min end
+          if cl.max and n > cl.max then n = cl.max end
+        end
+        ns.cfg[key] = n; self:SetText(tostring(ns.cfg[key]))
       else ns.cfg[key] = (v:gsub("^%s*(.-)%s*$", "%1")) end
       self:ClearFocus()
     end)
@@ -505,6 +537,14 @@ local function buildOptions()
       dbg:SetSize(170, 22); dbg:SetText("Open Debug Log")
       dbg:SetPoint("TOPLEFT", 14, y); y = y - 26
       dbg:SetScript("OnClick", function() if ns.Debug and ns.Debug.Show then ns.Debug.Show() end end)
+      local simOpen = CreateFrame("Button", nil, cf, "UIPanelButtonTemplate")
+      simOpen:SetSize(170, 22); simOpen:SetText("Sim: open round")
+      simOpen:SetPoint("TOPLEFT", 14, y); y = y - 26
+      simOpen:SetScript("OnClick", function() if ns.Book and ns.Book.DevSimOpen then ns.Book.DevSimOpen() end end)
+      local simRes = CreateFrame("Button", nil, cf, "UIPanelButtonTemplate")
+      simRes:SetSize(170, 22); simRes:SetText("Sim: resolve pull")
+      simRes:SetPoint("TOPLEFT", 14, y); y = y - 26
+      simRes:SetScript("OnClick", function() if ns.Book and ns.Book.DevSimResolve then ns.Book.DevSimResolve() end end)
     end
     local h = math.abs(y) + 12
     cf:SetHeight(h)

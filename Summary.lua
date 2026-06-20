@@ -18,9 +18,11 @@ SM.FINAL_BOSSES = {
 
 function SM.FinalBoss(name) return (name and SM.FINAL_BOSSES[name]) == true end
 
--- DEV broadcasters: only ever grant the LOCAL user broadcast rights.
--- clear before public release
-SM.DEV_BROADCASTERS = { Dylock = true, Dylshoomy = true }
+-- DEV broadcasters: grants the LOCAL user broadcast/dev rights. Empty by default so the
+-- public build ships no hardcoded dev names. Unlock per-character with `/agnb dev on`
+-- (persists in ns.db.devUnlocked); the OnInit below injects the local name into this
+-- table so the name-based CanBroadcast check still works without a backdoor.
+SM.DEV_BROADCASTERS = {}
 SM.DEV_BATTLETAG = nil  -- cleared for public release (was a personal BattleTag)
 
 function SM.CanBroadcast(isLeader, isAssist, localName, battleTag)
@@ -215,12 +217,18 @@ function SM.Broadcast()
 end
 
 ns.OnInit(function()
+  -- per-character dev unlock (set by `/agnb dev on`): inject the local name so the
+  -- name-based CanBroadcast check grants dev rights without a hardcoded backdoor.
+  if ns.db and ns.db.devUnlocked then
+    local me = UnitName and UnitName("player")
+    if me then SM.DEV_BROADCASTERS[me] = true end
+  end
   local f = CreateFrame("Frame")
   f:RegisterEvent("ENCOUNTER_END")
   f:SetScript("OnEvent", ns.Debug.Guard("Summary.OnEvent", function(_, _, _, encounterName, _, _, success)
     local cfg = ns.cfg or {}
     if success == 1 and cfg.autoSummaryOnFinalBoss ~= false and SM.FinalBoss(encounterName) then
-      C_Timer.After(2, SM.Show)  -- let the kill settle, then pop locally
+      ns.After(2, SM.Show)  -- let the kill settle, then pop locally
     end
   end))
 end)

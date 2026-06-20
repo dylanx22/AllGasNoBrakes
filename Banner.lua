@@ -69,9 +69,9 @@ function BN.Show(ctx)
   f:SetAlpha(1); f:Show()
   if cfg.wipeBannerSound ~= false and PlaySound then PlaySound(8959, "Master") end
   local secs = cfg.wipeBannerSeconds or 4
-  C_Timer.After(secs, function()
+  ns.After(secs, function()
     if UIFrameFadeOut then UIFrameFadeOut(f, 0.6, 1, 0) end
-    C_Timer.After(0.7, function() f:Hide() end)
+    ns.After(0.7, function() f:Hide() end)
   end)
 end
 

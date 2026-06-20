@@ -74,15 +74,19 @@ function I.ByBoss(deaths)
 end
 
 -- Deaths in a pull, time-ordered, each with seconds since pull start. pull is a
--- { pullId, startTime } record (e.g. from ns.Book.RecentPulls). cause = ability · mob.
+-- { startTime, endTime } record (e.g. from ns.Book.RecentPulls). Matches by the time
+-- WINDOW, not pullId, so synced deaths (which carry a foreign local pullId) are still
+-- included. cause = ability · mob.
 function I.PullTimeline(deaths, pull)
   local out = {}
+  local t0, t1 = pull.startTime or 0, pull.endTime or math.huge
   for _, d in ipairs(deaths) do
-    if d.pullId == pull.pullId then
+    local t = d.time or 0
+    if t >= t0 and t <= t1 then
       out[#out + 1] = {
         player = d.player, time = d.time,
         cause = (d.ability or "?") .. (d.sourceName and (" \194\183 " .. d.sourceName) or ""),
-        offset = (d.time or 0) - (pull.startTime or 0),
+        offset = t - t0,
       }
     end
   end

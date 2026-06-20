@@ -203,6 +203,7 @@ end
 
 function D.Clear()
   D.active = false
+  if ns.Book and ns.Book.RestoreSimConfig then ns.Book.RestoreSimConfig() end
   if ns.AntiPrize then ns.AntiPrize.ResetToSelf() end
   ns.Print("Mock data cleared.")
   if ns.UI then ns.UI.Refresh() end

@@ -75,16 +75,24 @@ local function build()
   f.fbDD = CreateFrame("Frame", "AGNB_BookFB_DD", f, "UIDropDownMenuTemplate")
   f.fbDD:SetPoint("TOPLEFT", 96, -142); UIDropDownMenu_SetWidth(f.fbDD, 150)
 
+  -- hot seat: dealt-target row (label + Survives / Dies buttons)
+  f.hsLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  f.hsLabel:SetPoint("TOPLEFT", 16, -174); f.hsLabel:SetTextColor(unpack(TAN))
+  f.hsSurvBtn = btn(f, "Survives", 80, function() ns.Book.PlaceHS("survives") end)
+  f.hsSurvBtn:SetPoint("TOPLEFT", 16, -194)
+  f.hsDiesBtn = btn(f, "Dies", 80, function() ns.Book.PlaceHS("dies") end)
+  f.hsDiesBtn:SetPoint("LEFT", f.hsSurvBtn, "RIGHT", 6, 0)
+
   -- results / standings text
   f.body = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  f.body:SetPoint("TOPLEFT", 18, -184); f.body:SetWidth(346); f.body:SetJustifyH("LEFT")
+  f.body:SetPoint("TOPLEFT", 18, -220); f.body:SetWidth(346); f.body:SetJustifyH("LEFT")
   f.body:SetJustifyV("TOP")
 
   -- admin-only "all wager math" pane: a scrollable whole-raid breakdown that
   -- overlays the body region (the plain body FontString can't scroll, and a full
   -- raid's bet-by-bet math runs well past the panel).
   f.mathPane = CreateFrame("ScrollFrame", "AGNB_BookAllMathScroll", f, "UIPanelScrollFrameTemplate")
-  f.mathPane:SetPoint("TOPLEFT", 16, -184); f.mathPane:SetPoint("BOTTOMRIGHT", -30, 44)
+  f.mathPane:SetPoint("TOPLEFT", 16, -220); f.mathPane:SetPoint("BOTTOMRIGHT", -30, 44)
   f.mathChild = CreateFrame("Frame", nil, f.mathPane); f.mathChild:SetSize(316, 10)
   f.mathPane:SetScrollChild(f.mathChild)
   f.mathText = f.mathChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -185,6 +193,62 @@ local function fbInitialize(self)
   for _, p in ipairs(cands) do add(p) end
 end
 
+-- Build the "Book Admin" settlement report: a master "who pays whom / what's
+-- paid" list (the thing an admin watches to confirm everyone settled up), then
+-- compact per-player nets + bet-by-bet detail for disputes. Re-rendered on every
+-- Refresh, so it updates live as payments confirm (trade/mail auto-detect, or a
+-- recipient's "/agnb book paid"). Transfers are whole gold; the bet detail keeps
+-- the exact deltas, so a player's audited net can differ by the rounding drift.
+function BUI.AdminReport()
+  local ST = ns.Settlement
+  if not (ST and ST.state) then
+    return "Close the book to settle, then the whole raid's settlement shows here."
+  end
+  local me = ns.MyName or (UnitName and UnitName("player")) or "?"
+  local sum = ns.Book.SettleSummary(ST.state)
+  local out = {}
+  out[#out + 1] = ("|cffffd966Settlement|r   %d of %d transfers settled  \194\183  |cffff8844%s outstanding|r")
+    :format(sum.settled, sum.total, money(sum.outstanding))
+  if sum.total == 0 then
+    out[#out + 1] = " "; out[#out + 1] = "  Nobody owes anyone \226\128\148 all square."
+  end
+  -- outstanding first (what still needs paying), then the settled receipts
+  local owed, paid = {}, {}
+  for _, t in ipairs(ST.state.transfers) do
+    if t.settled then
+      paid[#paid + 1] = ("  |cff66ff66%s \226\134\146 %s   %s  (paid)|r"):format(t.from, t.to, money(t.amount))
+    else
+      local remaining = (t.amount or 0) - (t.paid or 0)
+      local hint = (t.to == me) and ("   |cff888888/agnb book paid %s|r"):format(t.from) or ""
+      owed[#owed + 1] = ("  |cffffffff%s \226\134\146 %s|r   |cffff8844%s|r%s"):format(t.from, t.to, money(remaining), hint)
+    end
+  end
+  if #owed > 0 then
+    out[#out + 1] = " "; out[#out + 1] = "|cffffd966Outstanding \226\128\148 who still owes:|r"
+    for _, l in ipairs(owed) do out[#out + 1] = l end
+  end
+  if #paid > 0 then
+    out[#out + 1] = " "; out[#out + 1] = "|cffffd966Settled:|r"
+    for _, l in ipairs(paid) do out[#out + 1] = l end
+  end
+  -- per-player detail for disputes: net + each bet (compact line so it rarely wraps)
+  local all = (ST.AllMath and ST.AllMath()) or {}
+  if #all > 0 then
+    out[#out + 1] = " "; out[#out + 1] = "|cffffd966Player math (audit):|r"
+    for _, e in ipairs(all) do
+      out[#out + 1] = ("|cffffffff%s|r  net %s"):format(e.player, moneyDelta(e.net))
+      for _, ln in ipairs(e.lines or {}) do
+        out[#out + 1] = ("    [%d] %s \194\183 %s \226\134\146 %s  %s"):format(
+          ln.seq or 0, ln.bet or "?", tostring(ln.pick), ln.result or "", moneyDelta(ln.delta))
+      end
+    end
+    out[#out + 1] = " "
+    out[#out + 1] = "  |cff888888Transfers are rounded to whole gold; this audit shows exact stakes, "
+      .. "so a player's net can differ by <1g. It all nets to zero.|r"
+  end
+  return table.concat(out, "\n")
+end
+
 function BUI.Refresh()
   local f = BUI.frame
   if not f or not f:IsShown() then return end
@@ -193,9 +257,9 @@ function BUI.Refresh()
   f.offPrompt:SetShown(off); f.enableBtn:SetShown(off)
   if off then
     for _, w in ipairs({ f.state, f.openBtn, f.draftBtn, f.lockDraftBtn, f.ouLabel, f.overBtn,
-        f.underBtn, f.fbLabel, f.fbDD, f.body, f.joinBtn, f.closeBtn, f.mathBtn, f.allMathBtn,
-        f.mathPane, f.ignoreBtn, f.inviteBtn, f.settleBtn, f.title, f.adminStatus, f.adminDD,
-        f.setAdminBtn, f.clearAdminBtn }) do
+        f.underBtn, f.fbLabel, f.fbDD, f.hsLabel, f.hsSurvBtn, f.hsDiesBtn, f.body, f.joinBtn,
+        f.closeBtn, f.mathBtn, f.allMathBtn, f.mathPane, f.ignoreBtn, f.inviteBtn, f.settleBtn,
+        f.title, f.adminStatus, f.adminDD, f.setAdminBtn, f.clearAdminBtn }) do
       if w then w:SetShown(false) end
     end
     return
@@ -241,19 +305,75 @@ function BUI.Refresh()
   if r then
     f.state:SetText(("Round: %s  ·  O/U line %.1f  ·  stakes %dg / %dg")
       :format(r.state, r.line, r.stakeOU, r.stakeFB))
-    f.ouLabel:SetText(("Over/Under %.1f deaths this pull (%dg):"):format(r.line, r.stakeOU))
     local open = r.state == "OPEN"
-    setShown(f.ouLabel, true); setShown(f.overBtn, open); setShown(f.underBtn, open)
-    setShown(f.fbLabel, open); setShown(f.fbDD, open)
-    if open then UIDropDownMenu_Initialize(f.fbDD, fbInitialize) end
+    -- one bet per round: once placed, hide the buttons and show the locked pick.
+    local ouBet = r.myOU and r.myOU.pick
+    if ouBet then
+      f.ouLabel:SetText(("Over/Under %.1f (%dg)  ·  |cff66ff66your bet: %s|r"):format(r.line, r.stakeOU, ouBet))
+    else
+      f.ouLabel:SetText(("Over/Under %.1f deaths this pull (%dg):"):format(r.line, r.stakeOU))
+    end
+    -- auto-show the Hot Seat popup once per round open (guard avoids re-popping on refresh)
+    if open and BUI._popupShownFor ~= r.id then
+      BUI._popupShownFor = r.id
+      BUI.ShowHotSeatPopup()
+    end
+    setShown(f.ouLabel, true)
+    setShown(f.overBtn, open and not ouBet); setShown(f.underBtn, open and not ouBet)
+    setShown(f.fbLabel, open); setShown(f.fbDD, open and not r.myFB)
+    if open and not r.myFB then UIDropDownMenu_Initialize(f.fbDD, fbInitialize) end
+    if r.myFB then f.fbLabel:SetText(("First Blood: |cff66ff66your bet: %s|r"):format(r.myFB.pick)) end
+    -- hot seat row
+    local rd = r
+    if rd.hs then
+      local me = ns.MyName or (UnitName and UnitName("player"))
+      local tgt = ns.Book.DealTarget(rd.hs.seed, rd.hs.targets, me)
+      local pDie = rd.hs.lines[tgt] or 0.5
+      local hsBet = rd.myHS and rd.myHS.pick
+      if hsBet then
+        f.hsLabel:SetText(("Hot Seat: %s  ·  |cff66ff66your bet: %s|r"):format(tgt, hsBet))
+      else
+        f.hsLabel:SetText(("Hot Seat: %s  ·  Survives %s / Dies %s"):format(
+          tgt, ns.Book.OddsFromProb(1 - pDie), ns.Book.OddsFromProb(pDie)))
+      end
+      local selfTarget = (tgt == me)
+      setShown(f.hsSurvBtn, open and not hsBet); setShown(f.hsDiesBtn, open and not selfTarget and not hsBet)
+      setShown(f.hsLabel, open)
+    else
+      setShown(f.hsLabel, false); setShown(f.hsSurvBtn, false); setShown(f.hsDiesBtn, false)
+    end
   else
     f.state:SetText("No betting round yet." .. (admin and " (Open one above.)" or " Waiting for the raid leader."))
     f.ouLabel:SetText(""); setShown(f.overBtn, false); setShown(f.underBtn, false)
     setShown(f.fbLabel, false); setShown(f.fbDD, false)
+    setShown(f.hsLabel, false); setShown(f.hsSurvBtn, false); setShown(f.hsDiesBtn, false)
+  end
+
+  -- ----- Raid Hot Seat status (whole-raid market, independent of the per-pull round) -----
+  local rh = rt() and rt().raidHS
+  if ns.Book.RefreshRaidHSCount then ns.Book.RefreshRaidHSCount() end
+  if rh and rh.state == "OPEN" and BUI._rhsPopupShownFor ~= rh.id then
+    BUI._rhsPopupShownFor = rh.id
+    BUI.ShowRaidHotSeatPopup()
   end
 
   -- body: results + draft standings
   local lines = {}
+  if rh and rh.state ~= "SETTLED" then
+    local meName = ns.MyName or (UnitName and UnitName("player"))
+    if rh.state == "OPEN" then
+      if rh.subject == meName then
+        lines[#lines + 1] = ("|cffffd966Raid Hot Seat:|r you're tonight's Hot Seat (O/U %.1f) -- no bet."):format(rh.line)
+      else
+        lines[#lines + 1] = ("|cffffd966Raid Hot Seat:|r %s -- Over/Under %.1f deaths (%dg). Bet in the popup."):format(
+          rh.subject, rh.line, rh.stake)
+      end
+    else
+      lines[#lines + 1] = ("|cffffd966Raid Hot Seat:|r %s -- %d deaths so far (line %.1f)."):format(
+        rh.subject, rh.count or 0, rh.line)
+    end
+    lines[#lines + 1] = " "
+  end
   if r and (r.state == "RESOLVED" or r.state == "SETTLED") then
     lines[#lines + 1] = ("Outcome: %s  ·  First blood: %s"):format(r.outcomeOU or "?", r.outcomeFB or "?")
     if r.settleOU then
@@ -262,6 +382,34 @@ function BUI.Refresh()
     if r.settleFB then
       lines[#lines + 1] = ("First Blood pot %dg - winners: %s"):format(r.settleFB.pot,
         (#r.settleFB.winners > 0 and table.concat(r.settleFB.winners, ", ") or "nobody (rolls over)"))
+    end
+    -- Hot Seat: per-target outcome + this player's own win/loss (was previously only
+    -- in chat / Bet Records -- surface it in the betting window like O/U and FB).
+    if r.hs and r.hs.outcomes and next(r.hs.outcomes) then
+      local parts = {}
+      for _, t in ipairs(r.hs.targets or {}) do
+        local o = r.hs.outcomes[t]
+        if o then parts[#parts + 1] = ("%s %s"):format(t, o) end
+      end
+      if #parts > 0 then lines[#lines + 1] = "Hot Seat: " .. table.concat(parts, ", ") end
+      local me = ns.MyName or (UnitName and UnitName("player"))
+      if r.hs.result and me then
+        local matched = false
+        for _, pr in ipairs(r.hs.result.pairs or {}) do
+          if pr.winner == me or pr.loser == me then matched = true; break end
+        end
+        local d = r.hs.result.deltas and r.hs.result.deltas[me]
+        local tgt = ns.Book.DealTarget(r.hs.seed, r.hs.targets, me)
+        if matched and d then
+          if d >= 0 then
+            lines[#lines + 1] = ("  Your Hot Seat (%s): won +%dg"):format(tostring(tgt), math.floor(d / 10000 + 0.5))
+          else
+            lines[#lines + 1] = ("  Your Hot Seat (%s): lost %dg"):format(tostring(tgt), math.floor(-d / 10000 + 0.5))
+          end
+        elseif r.myHS then
+          lines[#lines + 1] = "  Your Hot Seat bet was unmatched (refunded)."
+        end
+      end
     end
   end
   if dr then
@@ -341,40 +489,34 @@ function BUI.Refresh()
     end
   end
 
-  -- the admin "all wager math" pane swaps in over the body when toggled on
-  local showPane = BUI.showAllMath and admin and ns.Settlement
-  if f.allMathBtn then f.allMathBtn:SetText(showPane and "Hide math" or "All math") end
-  if showPane then
-    local ml = {}
-    if not ns.Settlement.state then
-      ml[#ml + 1] = "Close the book to settle, then the whole raid's wager math shows here."
-    else
-      local all = (ns.Settlement.AllMath and ns.Settlement.AllMath()) or {}
-      if #all == 0 then
-        ml[#ml + 1] = "No wagers were placed this session."
-      else
-        for _, e in ipairs(all) do
-          ml[#ml + 1] = ("|cffffffff%s|r   net %s"):format(e.player, moneyDelta(e.net))
-          if #e.lines == 0 then
-            ml[#ml + 1] = "    (no individual bets)"
-          else
-            for _, ln in ipairs(e.lines) do
-              ml[#ml + 1] = ("    [%d] %s %s - %s (%s)"):format(ln.seq or 0, ln.bet or "?",
-                tostring(ln.pick), ln.outcome or "", moneyDelta(ln.delta))
-            end
-          end
-        end
-      end
-    end
-    f.mathText:SetText(table.concat(ml, "\n"))
+  -- ----- "Book Admin" view: a clean, full-window, auto-updating settlement report.
+  -- It REPLACES the betting controls (rather than overlaying them, which collided)
+  -- so the admin sees only the who-pays-whom / what's-paid report while it's open.
+  local adminView = BUI.showAllMath and admin and ns.Settlement
+  if f.allMathBtn then f.allMathBtn:SetText(adminView and "Back to betting" or "Book Admin") end
+  -- betting-view widgets, hidden while the admin report is up so nothing overlaps it
+  local bettingWidgets = { f.state, f.openBtn, f.draftBtn, f.lockDraftBtn, f.closeBtn,
+    f.ouLabel, f.overBtn, f.underBtn, f.fbLabel, f.fbDD, f.hsLabel, f.hsSurvBtn, f.hsDiesBtn,
+    f.body, f.mathBtn, f.ignoreBtn, f.inviteBtn, f.adminStatus, f.adminDD, f.setAdminBtn,
+    f.clearAdminBtn }
+  if adminView then
+    for _, w in ipairs(bettingWidgets) do setShown(w, false) end
+    setShown(f.joinBtn, false)
+    -- the toggle becomes a bottom-left "back" button, clear of the report pane
+    f.allMathBtn:ClearAllPoints(); f.allMathBtn:SetPoint("BOTTOMLEFT", 16, 14)
+    f.mathPane:ClearAllPoints()
+    f.mathPane:SetPoint("TOPLEFT", 16, -44); f.mathPane:SetPoint("BOTTOMRIGHT", -30, 44)
+    f.mathText:SetText(BUI.AdminReport())
     f.mathChild:SetHeight((f.mathText:GetStringHeight() or 10) + 12)
     f.mathPane:Show(); f.body:Hide()
   else
+    -- restore the toggle to the left button stack above "Show math"
+    f.allMathBtn:ClearAllPoints(); f.allMathBtn:SetPoint("BOTTOMLEFT", f.mathBtn, "TOPLEFT", 0, 6)
     f.mathPane:Hide(); f.body:Show()
     f.body:SetText(table.concat(lines, "\n"))
+    setShown(f.joinBtn, dr and dr.state == "OPEN")
+    if f.inviteBtn then f.inviteBtn:SetShown(ns.AntiPrize and ns.AntiPrize.CanInvite() or false) end
   end
-  setShown(f.joinBtn, dr and dr.state == "OPEN")
-  if f.inviteBtn then f.inviteBtn:SetShown(ns.AntiPrize and ns.AntiPrize.CanInvite() or false) end
   if f.settleBtn then
     local nxt = ns.Settlement and ns.Settlement.MailNext and ns.Settlement.MailNext()
     f.settleBtn:SetShown(nxt ~= nil)
@@ -398,6 +540,157 @@ function BUI.SettleByMail()
   if SendMailSubjectEditBox then SendMailSubjectEditBox:SetText("Book settlement") end
   if MoneyInputFrame_SetCopper and SendMailMoney then MoneyInputFrame_SetCopper(SendMailMoney, nxt.amount) end
   ns.Print(("Pre-filled mail: %s to %s. Click Send."):format(money(nxt.amount), nxt.to))
+end
+
+-- Between-pulls Hot Seat popup: lazily created, parented to UIParent so it
+-- floats independently of the main book panel.
+function BUI.ShowHotSeatPopup()
+  -- guard: wagering must be on and the round must have a hot-seat config
+  if not (ns.cfg and ns.cfg.bookEnabled) then return end
+  local rd = rt() and rt().round
+  if not rd then return end
+  if not rd.hs then return end
+
+  -- deal this player's target
+  local me = ns.MyName or (UnitName and UnitName("player"))
+  local target = ns.Book.DealTarget(rd.hs.seed, rd.hs.targets, me)
+  if not target then return end
+
+  -- odds + stakes
+  local pDie = rd.hs.lines[target] or 0.5
+  local stk   = ns.Book.HotSeatStakes(pDie, rd.hs.stakeBase)
+
+  -- survives side: risk is favStake when favSide=="survives", else dogStake
+  local survRisk = (stk.favSide == "survives") and stk.favStake or stk.dogStake
+  local survWin  = (stk.favSide == "survives") and stk.dogStake  or stk.favStake
+  local diesRisk = (stk.favSide == "dies")     and stk.favStake  or stk.dogStake
+  local diesWin  = (stk.favSide == "dies")     and stk.dogStake  or stk.favStake
+
+  -- lazily build the popup frame
+  local p = BUI.popup
+  if not p then
+    p = CreateFrame("Frame", "AGNB_HotSeatPopup", UIParent, "BackdropTemplate")
+    p:SetSize(340, 180); p:SetPoint("CENTER", 0, 80)
+    p:SetFrameStrata("FULLSCREEN_DIALOG")
+    p:SetMovable(true); p:EnableMouse(true); p:RegisterForDrag("LeftButton")
+    p:SetScript("OnDragStart", p.StartMoving); p:SetScript("OnDragStop", p.StopMovingOrSizing)
+    if p.SetBackdrop then
+      p:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8",
+                      edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
+      p:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
+      p:SetBackdropBorderColor(0.6, 0.5, 0.1, 1)
+    end
+    local cx = CreateFrame("Button", nil, p, "UIPanelCloseButton"); cx:SetPoint("TOPRIGHT", 2, 2)
+    cx:SetScript("OnClick", function() p:Hide() end)
+
+    p.title = p:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    p.title:SetPoint("TOPLEFT", 14, -14); p.title:SetTextColor(unpack(GOLD))
+
+    p.stats = p:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    p.stats:SetPoint("TOPLEFT", 14, -40); p.stats:SetWidth(300); p.stats:SetJustifyH("LEFT")
+
+    p.survBtn = btn(p, "Survives", 90, function()
+      ns.Book.PlaceHS("survives"); p:Hide()
+    end)
+    p.survBtn:SetPoint("BOTTOMLEFT", 14, 14)
+
+    p.diesBtn = btn(p, "Dies", 80, function()
+      ns.Book.PlaceHS("dies"); p:Hide()
+    end)
+    p.diesBtn:SetPoint("LEFT", p.survBtn, "RIGHT", 6, 0)
+
+    p.skipBtn = btn(p, "Skip", 70, function() p:Hide() end)
+    p.skipBtn:SetPoint("LEFT", p.diesBtn, "RIGHT", 6, 0)
+
+    BUI.popup = p
+  end
+
+  -- populate title: target name + odds for each side
+  local survOdds = ns.Book.OddsFromProb(1 - pDie)
+  local diesOdds = ns.Book.OddsFromProb(pDie)
+  p.title:SetText(("Hot Seat: %s"):format(target))
+
+  -- populate stats: odds line + risk/win amounts + all-time deaths
+  local store = (ns.Demo and ns.Demo.store) or (ns.db and ns.db.store)
+  local rec   = store and store.allTime and store.allTime[target]
+  -- risk/win come straight from HotSeatStakes(pDie, stakeBase) where stakeBase is in
+  -- GOLD, so they are gold integers -- format with %dg, not money() (which expects copper).
+  local statsLines = {
+    ("Survives %s  (risk %dg, win %dg)"):format(survOdds, survRisk, survWin),
+    ("Dies     %s  (risk %dg, win %dg)"):format(diesOdds, diesRisk, diesWin),
+  }
+  if rec then
+    local nemLine = ""
+    if rec.byCause then
+      local topK, topV = nil, 0
+      for k, v in pairs(rec.byCause) do
+        if v > topV then topK, topV = k, v end
+      end
+      if topK then
+        -- byCause keys are "ability\31source"; show just ability for readability
+        local ability = topK:match("^([^\31]+)")
+        nemLine = ("  ·  nemesis: %s"):format(ability or topK)
+      end
+    end
+    statsLines[#statsLines + 1] = ("All-time deaths: %d%s"):format(rec.deaths or 0, nemLine)
+  end
+  p.stats:SetText(table.concat(statsLines, "\n"))
+
+  -- hide Dies button when the player is their own target
+  local selfTarget = (target == me)
+  p.diesBtn:SetShown(not selfTarget)
+  -- re-anchor Skip so it hugs the visible buttons
+  p.skipBtn:ClearAllPoints()
+  if selfTarget then
+    p.skipBtn:SetPoint("LEFT", p.survBtn, "RIGHT", 6, 0)
+  else
+    p.skipBtn:SetPoint("LEFT", p.diesBtn, "RIGHT", 6, 0)
+  end
+
+  p:Show()
+end
+
+-- Raid Hot Seat popup: a floating Over/Under bet on the night's nominated raider.
+-- Floats over UIParent so it never collides with the book panel layout. Pops once at
+-- open for everyone except the subject (who can't bet on their own count).
+function BUI.ShowRaidHotSeatPopup()
+  if not (ns.cfg and ns.cfg.bookEnabled) then return end
+  local rh = rt() and rt().raidHS
+  if not (rh and rh.state == "OPEN") then return end
+  local me = ns.MyName or (UnitName and UnitName("player"))
+  if rh.subject == me then return end   -- the subject can't bet on themselves
+
+  local p = BUI.rhsPopup
+  if not p then
+    p = CreateFrame("Frame", "AGNB_RaidHotSeatPopup", UIParent, "BackdropTemplate")
+    p:SetSize(340, 150); p:SetPoint("CENTER", 0, 120)
+    p:SetFrameStrata("FULLSCREEN_DIALOG")
+    p:SetMovable(true); p:EnableMouse(true); p:RegisterForDrag("LeftButton")
+    p:SetScript("OnDragStart", p.StartMoving); p:SetScript("OnDragStop", p.StopMovingOrSizing)
+    if p.SetBackdrop then
+      p:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8",
+                      edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
+      p:SetBackdropColor(0.05, 0.04, 0.02, 0.97)
+      p:SetBackdropBorderColor(0.6, 0.5, 0.1, 1)
+    end
+    local cx = CreateFrame("Button", nil, p, "UIPanelCloseButton"); cx:SetPoint("TOPRIGHT", 2, 2)
+    cx:SetScript("OnClick", function() p:Hide() end)
+    p.title = p:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    p.title:SetPoint("TOPLEFT", 14, -14); p.title:SetTextColor(unpack(GOLD))
+    p.stats = p:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    p.stats:SetPoint("TOPLEFT", 14, -42); p.stats:SetWidth(300); p.stats:SetJustifyH("LEFT")
+    p.overBtn = btn(p, "Over", 90, function() ns.Book.PlaceRaidHS("over"); p:Hide() end)
+    p.overBtn:SetPoint("BOTTOMLEFT", 14, 14)
+    p.underBtn = btn(p, "Under", 90, function() ns.Book.PlaceRaidHS("under"); p:Hide() end)
+    p.underBtn:SetPoint("LEFT", p.overBtn, "RIGHT", 6, 0)
+    p.skipBtn = btn(p, "Skip", 70, function() p:Hide() end)
+    p.skipBtn:SetPoint("LEFT", p.underBtn, "RIGHT", 6, 0)
+    BUI.rhsPopup = p
+  end
+  p.title:SetText(("Raid Hot Seat: %s"):format(rh.subject))
+  p.stats:SetText(("Over/Under %.1f deaths this whole raid.\nFlat stake: risk %dg to win the pool."):format(
+    rh.line, rh.stake))
+  p:Show()
 end
 
 function BUI.Toggle()

@@ -47,7 +47,15 @@ end
 local ROWH = 19
 
 -- ----- class color via the group roster (names aren't unit tokens) -----
+-- Cached per name so a full leaderboard refresh doesn't rescan the roster for every
+-- row (refresh runs on every death). Only successful lookups are cached -- a miss may
+-- just mean the roster hasn't loaded yet -- and the cache is cleared on
+-- GROUP_ROSTER_UPDATE (see OnInit) so newly-joined raiders pick up their color.
+local classColorCache = {}
 local function classColor(name)
+  if not name then return unpack(TAN) end
+  local cached = classColorCache[name]
+  if cached then return cached[1], cached[2], cached[3] end
   if not (UnitClass and UnitName) then return unpack(TAN) end
   local function colorFor(unit)
     if UnitName(unit) ~= name then return nil end
@@ -56,13 +64,15 @@ local function classColor(name)
     if c then return c.r, c.g, c.b end
   end
   local r, g, b = colorFor("player")
-  if r then return r, g, b end
-  local n = (GetNumGroupMembers and GetNumGroupMembers()) or 0
-  local prefix = (IsInRaid and IsInRaid()) and "raid" or "party"
-  for i = 1, n do
-    r, g, b = colorFor(prefix .. i)
-    if r then return r, g, b end
+  if not r then
+    local n = (GetNumGroupMembers and GetNumGroupMembers()) or 0
+    local prefix = (IsInRaid and IsInRaid()) and "raid" or "party"
+    for i = 1, n do
+      r, g, b = colorFor(prefix .. i)
+      if r then break end
+    end
   end
+  if r then classColorCache[name] = { r, g, b }; return r, g, b end
   return unpack(TAN)
 end
 
@@ -917,7 +927,7 @@ function UI.DoReportType(kind, opts)
   end
   local chan = opts.channel or cfg.reportChannel or "SELF"
   for i, line in ipairs(lines or {}) do
-    C_Timer.After((i - 1) * 0.3, function()
+    ns.After((i - 1) * 0.3, function()
       if chan == "SELF" or not SendChatMessage then ns.Print(line) else SendChatMessage(line, chan) end
     end)
   end
@@ -1087,4 +1097,8 @@ end
 ns.OnInit(function()
   ns.MyName = UnitName and UnitName("player") or nil
   if Minimap then buildMinimap() end
+  -- drop cached class colors when the roster changes so new raiders get colored
+  local rf = CreateFrame("Frame")
+  rf:RegisterEvent("GROUP_ROSTER_UPDATE")
+  rf:SetScript("OnEvent", function() classColorCache = {} end)
 end)

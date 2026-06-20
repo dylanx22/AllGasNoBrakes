@@ -20,10 +20,14 @@ function ST.Compute()
   local ledger = (ns.Book and ns.Book.rt and ns.Book.rt.ledger) or {}
   local bd = ns.Book.SettlementBreakdown(ledger)
   local nets = ns.Book.NetsFromBreakdown(bd)
+  -- Settle in whole gold so no one trades sub-gold; the bet-by-bet breakdown keeps
+  -- the exact deltas, and the rounding drift is absorbed across players (sums to 0).
+  local rounded = ns.Book.RoundNetsToGold(nets)
   ST.breakdown = bd
   ST.nets = nets
-  ST.state = ns.Book.NewSettleState(ns.Book.NetDebts(nets))
-  ST.checksum = ns.Book.NetChecksum(nets)
+  ST.roundedNets = rounded
+  ST.state = ns.Book.NewSettleState(ns.Book.NetDebts(rounded))
+  ST.checksum = ns.Book.NetChecksum(rounded)
   ST.received = {}
   ST.peerChecksums = { [myName()] = ST.checksum }
   ST.desync = false

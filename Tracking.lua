@@ -74,6 +74,9 @@ function TR.ResolveRaidId()
   local instanceID = nil
   if inInstance and GetInstanceInfo then instanceID = select(8, GetInstanceInfo()) end
   TR.raidId = TR.RaidIdFor(inInstance, instanceID, TR.sessionId)
+  -- keep the current raid's killcams; strip older raids' so the save doesn't grow a
+  -- per-death timeline across a season (idempotent -- already-stripped deaths are skipped).
+  if ns.db and ns.db.store then ns.DB.PruneKillcams(ns.db.store, TR.raidId) end
   return TR.raidId
 end
 
@@ -93,50 +96,81 @@ end
 --   11 destRaidFlags, then event-specific params (12+).
 -- SPELL_* : 12 spellId, 13 spellName, 14 spellSchool.
 -- ENVIRONMENTAL_DAMAGE : 12 environmentalType.
-local function readEvent()
-  local t = { CombatLogGetCurrentEventInfo() }
-  -- spellName (t[13]) is normally a string, but some Anniversary-client events
-  -- hand back a numeric spellId here instead. Resolve it to a readable name when
-  -- we can, otherwise stringify it -- a death's ability MUST be a string so the
-  -- leaderboard's cause/source maps never mix number and string keys (which makes
-  -- their tie-break comparison crash). See DB topKey() in Database.lua.
-  local spell = t[13]
+-- Subevents we actually act on (last-hit buffer, killcam, death). Everything else
+-- (auras, casts we ignore, energize, etc.) is dropped before any allocation.
+local PROCESSED = {
+  SPELL_DAMAGE = true, SWING_DAMAGE = true, RANGE_DAMAGE = true, SPELL_PERIODIC_DAMAGE = true,
+  SPELL_HEAL = true, SPELL_PERIODIC_HEAL = true, SPELL_CAST_SUCCESS = true,
+  UNIT_DIED = true, ENVIRONMENTAL_DAMAGE = true,
+}
+
+-- Pure: normalize the combat-log vararg tuple into the `info` table OnCombatLog
+-- consumes, or nil for subevents we don't track. Taking the params directly (instead
+-- of packing CombatLogGetCurrentEventInfo() into a table) and early-bailing BEFORE
+-- allocating keeps this allocation-free on every ignored event -- and this runs on the
+-- hottest event in the game, so per-event garbage is what causes raid-combat GC stutter.
+-- Field order (TBC Classic, same base params as retail):
+--   1 timestamp, 2 subevent, 3 hideCaster, 4 sourceGUID, 5 sourceName, 6 sourceFlags,
+--   7 sourceRaidFlags, 8 destGUID, 9 destName, 10 destFlags, 11 destRaidFlags, 12+ event-specific.
+-- SPELL_* : 12 spellId, 13 spellName, 14 spellSchool, 15 amount.  SWING_DAMAGE : 12 amount.
+-- ENVIRONMENTAL_DAMAGE : 12 environmentalType.
+function TR.ReadEvent(ts, se, _hideCaster, _srcGUID, srcName, srcFlags,
+                      _srcRaidFlags, _destGUID, destName, destFlags, _destRaidFlags,
+                      p12, p13, p14, p15)
+  if not PROCESSED[se] then return nil, ts end
+  -- spellName (p13) is normally a string, but some Anniversary-client events hand back
+  -- a numeric spellId here. Resolve it to a name when we can, else stringify -- a death's
+  -- ability MUST be a string so the leaderboard's cause/source maps never mix number and
+  -- string keys (which crashes their tie-break compare). See DB topKey() in Database.lua.
+  local spell = p13
   if type(spell) == "number" then
     spell = (GetSpellInfo and GetSpellInfo(spell)) or tostring(spell)
   end
   local info = {
-    subevent = t[2],
-    sourceName = t[5],
-    destName = t[9],
+    subevent = se,
+    sourceName = srcName,
+    destName = destName,
     destIsPlayer = false,
     spell = spell,
-    envType = t[12],
+    envType = p12,
   }
-  if t[10] and bit and bit.band then
-    info.destIsPlayer = bit.band(t[10], COMBATLOG_OBJECT_TYPE_PLAYER or 0x400) > 0
+  if destFlags and bit and bit.band then
+    info.destIsPlayer = bit.band(destFlags, COMBATLOG_OBJECT_TYPE_PLAYER or 0x400) > 0
   end
-  if t[6] and bit and bit.band then
-    info.sourceIsPlayer = bit.band(t[6], COMBATLOG_OBJECT_TYPE_PLAYER or 0x400) > 0
+  if srcFlags and bit and bit.band then
+    info.sourceIsPlayer = bit.band(srcFlags, COMBATLOG_OBJECT_TYPE_PLAYER or 0x400) > 0
   end
-  local se = t[2]
   if se == "SWING_DAMAGE" then
-    info.amount = t[12]
+    info.amount = p12
   elseif se == "SPELL_DAMAGE" or se == "RANGE_DAMAGE" or se == "SPELL_PERIODIC_DAMAGE"
       or se == "SPELL_HEAL" or se == "SPELL_PERIODIC_HEAL" then
-    info.amount = t[15]
+    info.amount = p15
   end
-  return info, t[1]
+  return info, ts
+end
+
+local function readEvent()
+  return TR.ReadEvent(CombatLogGetCurrentEventInfo())
 end
 
 -- Is `name` a member of the player's guild? (short name match against the roster)
-local function isGuildMember(name)
-  if not name then return false end
+-- The roster set is cached and rebuilt only when the member count changes, so a death
+-- during a guildOnly raid is an O(1) lookup instead of a full-roster scan per death.
+local guildSet, guildSetN = nil, -1
+local function guildMemberSet()
   local n = (GetNumGuildMembers and GetNumGuildMembers()) or 0
+  if guildSet and guildSetN == n then return guildSet end
+  local set = {}
   for i = 1, n do
     local full = GetGuildRosterInfo and GetGuildRosterInfo(i)
-    if full and (full:match("^[^-]+") or full) == name then return true end
+    if full then set[full:match("^[^-]+") or full] = true end
   end
-  return false
+  guildSet, guildSetN = set, n
+  return set
+end
+local function isGuildMember(name)
+  if not name then return false end
+  return guildMemberSet()[name] == true
 end
 
 -- Guard rails: ignore deaths outside instances / outside combat when configured.
@@ -158,6 +192,7 @@ end
 
 function TR.OnCombatLog()
   local info, ts = readEvent()
+  if not info then return end   -- subevent we don't track (no allocation happened)
   local se = info.subevent
   if se == "SPELL_DAMAGE" or se == "SWING_DAMAGE" or se == "RANGE_DAMAGE" or se == "SPELL_PERIODIC_DAMAGE" then
     if info.destName then

@@ -3,6 +3,11 @@ ns = ns or __AGNB_NS
 ns.DB = ns.DB or {}
 local DB = ns.DB
 
+-- Session-only de-dup index (NOT persisted): each raid table -> { "player\0time" = true }.
+-- Weak keys so when a raid/store is dropped (e.g. demo cleared) its index is freed too.
+local seenIndex = setmetatable({}, { __mode = "k" })
+local function deathKey(d) return (d.player or "?") .. "\0" .. tostring(d.time) end
+
 function DB.NewStore()
   return { allTime = {}, raids = {}, settings = {}, bets = {} }
 end
@@ -72,11 +77,16 @@ end
 -- Returns true if recorded, false if a duplicate (same player+time) already exists.
 function DB.RecordDeath(store, raidId, death)
   local raid = ensureRaid(store, raidId)
-  for _, existing in ipairs(raid.deaths) do
-    if existing.player == death.player and existing.time == death.time then
-      return false
-    end
+  local seen = seenIndex[raid]
+  if not seen then
+    -- first touch this session: seed from any deaths already loaded from SavedVariables.
+    seen = {}
+    for _, d in ipairs(raid.deaths) do seen[deathKey(d)] = true end
+    seenIndex[raid] = seen
   end
+  local key = deathKey(death)
+  if seen[key] then return false end
+  seen[key] = true
   raid.deaths[#raid.deaths + 1] = death
 
   applyAllTime(store, death)
@@ -217,6 +227,22 @@ function DB.AbilityBoard(store, raidId)
   return sortDesc(out)
 end
 
+-- Drop the heavy killcam timelines from deaths in every raid except `keepRaidId` (the
+-- current session's raid), so SavedVariables doesn't accumulate a per-death timeline
+-- across a whole season. Stats/aggregates are unaffected (they never read killcam).
+-- Returns how many timelines were stripped.
+function DB.PruneKillcams(store, keepRaidId)
+  local stripped = 0
+  for raidId, raid in pairs((store and store.raids) or {}) do
+    if raidId ~= keepRaidId then
+      for _, d in ipairs(raid.deaths or {}) do
+        if d.killcam then d.killcam = nil; stripped = stripped + 1 end
+      end
+    end
+  end
+  return stripped
+end
+
 -- Recompute all-time aggregates from scratch from every recorded death.
 function DB.RebuildAllTime(store)
   store.allTime = {}
@@ -239,6 +265,7 @@ function DB.VoidLastPull(store, raidId)
     if (d.pullId or 0) == maxPull then removed = removed + 1 else kept[#kept + 1] = d end
   end
   raid.deaths = kept
+  seenIndex[raid] = nil   -- voided keys removed: rebuild the de-dup index on next record
   DB.RebuildAllTime(store)
   return removed, maxPull
 end
@@ -255,6 +282,7 @@ function DB.VoidWindow(store, raidId, t0, t1)
     if t >= t0 and t <= t1 then removed = removed + 1 else kept[#kept + 1] = d end
   end
   raid.deaths = kept
+  seenIndex[raid] = nil   -- voided keys removed: rebuild the de-dup index on next record
   DB.RebuildAllTime(store)
   return removed
 end

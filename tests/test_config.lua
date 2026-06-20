@@ -24,3 +24,12 @@ T.eq(cfg2.wipeTagline, "ALL GAS, NO BRAKES", "default tagline")
 T.eq(cfg2.autoSummaryOnFinalBoss, true, "auto summary default on")
 T.eq(cfg2.streakThreshold, 3, "default streak threshold")
 T.eq(cfg2.brandName, "", "brand override empty by default")
+
+-- Raid Hot Seat config: stake is user-facing + placed in a tab; fallback line defaults.
+do
+  local saved3 = CFG.ApplyDefaults({})
+  T.eq(saved3.bookRaidLineFallback, 3.5, "raid HS fallback line default")
+  T.ok(saved3.bookStakeRHS ~= nil, "raid HS stake has a default")
+  local covered = CFG.CoveredKeys()
+  T.ok(covered.bookStakeRHS ~= nil, "bookStakeRHS is placed in a settings tab")
+end

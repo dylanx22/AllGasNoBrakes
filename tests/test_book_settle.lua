@@ -1,5 +1,27 @@
 local B = __AGNB_NS.Book
 
+-- RoundNetsToGold: every value becomes a whole-gold multiple, still sums to zero.
+do
+  -- 7g50s vs -7g50s: the .5/.5 rounding goes to the first name, stays zero-sum.
+  local r = B.RoundNetsToGold({ Ann = 75000, Bob = -75000 })
+  T.eq(r.Ann % 10000, 0, "Ann rounds to whole gold")
+  T.eq(r.Bob % 10000, 0, "Bob rounds to whole gold")
+  T.eq(r.Ann + r.Bob, 0, "rounded nets still sum to zero")
+  T.eq(r.Ann, 80000, "Ann (first by name) absorbs the +0.5g")
+  T.eq(r.Bob, -80000, "Bob settles the matching whole-gold amount")
+
+  -- three-way pari-mutuel drift: +5g, +2g50s, -7g50s -> all whole gold, sum 0.
+  local r2 = B.RoundNetsToGold({ A = 50000, B = 25000, C = -75000 })
+  T.eq(r2.A % 10000, 0, "A whole gold"); T.eq(r2.B % 10000, 0, "B whole gold")
+  T.eq(r2.C % 10000, 0, "C whole gold")
+  T.eq(r2.A + r2.B + r2.C, 0, "three-way rounded nets sum to zero")
+
+  -- sub-gold-only round: +0.14g vs -0.14g collapses to no transfer at all.
+  local r3 = B.RoundNetsToGold({ X = 1400, Y = -1400 })
+  T.eq(r3.X, 0, "tiny winner rounds to 0 (no sub-gold trade)")
+  T.eq(r3.Y, 0, "tiny loser rounds to 0 (no sub-gold trade)")
+end
+
 -- SettleSummary: counts settled transfers and sums outstanding (copper).
 do
   local st = { transfers = {
@@ -63,6 +85,22 @@ do
   T.eq(bd.Bob.lines[1].outcome, "4 deaths -> over", "O/U outcome shows the death count")
 end
 
+-- SettlementBreakdown: a raidHS ledger entry settles pari-mutuel (RoundDeltas) and is
+-- labeled as a Raid Hot Seat line, distinct from a per-pull O/U.
+do
+  local rounds = { {
+    seq = 1, raidHS = true, subject = "Goat", line = 3.5,
+    ouReveals = { Ann = "over", Bob = "under" }, ouOutcome = "over",
+    ouStake = 50000, ouCount = 5,
+  } }
+  local bd = B.SettlementBreakdown(rounds)
+  T.eq(bd.Ann.net, 50000, "over backer wins the under backer's 5g stake")
+  T.eq(bd.Bob.net, -50000, "under backer loses 5g")
+  T.eq(bd.Ann.net + bd.Bob.net, 0, "raid HS pari-mutuel sums to zero")
+  T.eq(bd.Ann.lines[1].bet, "Raid Hot Seat: Goat O/U 3.5", "labeled as Raid Hot Seat")
+  T.eq(bd.Ann.lines[1].outcome, "Goat: 5 deaths -> over", "audit shows subject count")
+end
+
 -- ApplyPayment: recipient-authoritative, cumulative (idempotent), partial-friendly.
 do
   local st = B.NewSettleState({ { from = "Dan", to = "Anna", amount = 10 } })
@@ -85,6 +123,26 @@ do
   T.eq(a, b, "checksum is order-independent")
   local c = B.NetChecksum({ Anna = 7, Bob = -7 })
   T.ok(a ~= c, "different nets -> different checksum")
+end
+
+-- ----- Hot Seat settlement: matched pair nets winner/loser; unmatched pushes -----
+do
+  local rounds = {
+    { seq = 1, boss = "Gruul",
+      hsOrders = {
+        Ann = { target = "Carol", side = "dies" },     -- favorite side (0.75 -> dies favored)
+        Cy  = { target = "Carol", side = "survives" },  -- underdog side
+        Bob = { target = "Carol", side = "dies" },      -- surplus -> unmatched
+      },
+      hsOutcomes = { Carol = "survives" },
+      hsLines = { Carol = 0.75 },
+      hsStakeBase = 100,   -- copper base (underdog stake); favorite stakes 300
+    },
+  }
+  local bd = B.SettlementBreakdown(rounds)
+  T.eq(bd.Cy.net, 300, "Hot Seat underdog wins the favorite's 300 stake")
+  T.eq(bd.Ann.net, -300, "Hot Seat matched favorite loses 300")
+  T.eq(bd.Bob.net, 0, "unmatched Hot Seat bettor pushes (refund)")
 end
 
 -- ST.AllMath: whole-raid breakdown, biggest winners first, name-tiebroken.

@@ -128,20 +128,53 @@ do
   T.eq(d.Anna, 0, "zero stake delta"); T.eq(d.Bob, 0, "zero stake delta")
 end
 
--- RecentPulls: group deaths by pull, most-recent first, counted (non-cascade) count,
--- with epoch start/end bounds (death.time domain) for cross-client windowing.
+-- RecentPulls: cluster deaths into pulls by TIME GAP (not pullId), most-recent first,
+-- counted (non-cascade) count, with epoch start/end bounds for cross-client windowing.
 do
   local deaths = {
-    { player = "A", time = 100, pullId = 1, boss = "Gruul", classification = "counted" },
-    { player = "B", time = 104, pullId = 1, boss = "Gruul", classification = "wipeCascade" },
-    { player = "C", time = 200, pullId = 2, boss = "Mag",   classification = "counted" },
-    { player = "D", time = 210, pullId = 2, boss = "Mag",   classification = "counted" },
+    -- pull 1 @ ~100 (one counted + one cascade); pull 2 @ ~400 (gap >> 90s -> new pull).
+    -- pullIds are intentionally mismatched/foreign to prove they aren't used for grouping.
+    { player = "A", time = 100, pullId = 9, boss = "Gruul", classification = "counted" },
+    { player = "B", time = 104, pullId = 3, boss = "Gruul", classification = "wipeCascade" },
+    { player = "C", time = 400, pullId = 1, boss = "Mag",   classification = "counted" },
+    { player = "D", time = 410, pullId = 7, boss = "Mag",   classification = "counted" },
   }
   local pulls = B.RecentPulls(deaths)
-  T.eq(#pulls, 2, "two pulls")
-  T.eq(pulls[1].pullId, 2, "most recent pull first")
+  T.eq(#pulls, 2, "two pulls split by the time gap, regardless of pullId")
+  T.eq(pulls[1].startTime, 400, "most recent pull first (start 400)")
   T.eq(pulls[1].count, 2, "counts non-cascade deaths")
-  T.eq(pulls[1].startTime, 200, "earliest death time in the pull")
-  T.eq(pulls[1].endTime, 210, "latest death time in the pull")
-  T.eq(pulls[2].count, 1, "pull 1 cascade death excluded from count")
+  T.eq(pulls[1].endTime, 410, "latest death time in the pull")
+  T.eq(pulls[2].count, 1, "older pull's cascade death excluded from count")
+  -- deaths within the gap window stay one pull even with different pullIds
+  local same = B.RecentPulls({
+    { player = "A", time = 100, pullId = 1, classification = "counted" },
+    { player = "B", time = 150, pullId = 2, classification = "counted" }, -- 50s gap < 90
+  })
+  T.eq(#same, 1, "deaths within the gap are one pull even across pullIds")
+  T.eq(same[1].count, 2, "both counted in the single pull")
+end
+
+-- SubjectRaidCounts: per-raid counted-death counts for one player, only for raids
+-- they were present in (had any death record), sorted by raid key. Feeds AutoLine.
+do
+  local store = { raids = {
+    r2 = { deaths = {
+      { player = "Goat", time = 1, classification = "counted" },
+      { player = "Goat", time = 2, classification = "wipeCascade" }, -- excluded from count
+      { player = "Other", time = 3, classification = "counted" },
+    } },
+    r1 = { deaths = {
+      { player = "Goat", time = 1, classification = "counted" },
+      { player = "Goat", time = 2, classification = "counted" },
+    } },
+    r3 = { deaths = {  -- Goat absent: this raid is not in Goat's history
+      { player = "Other", time = 1, classification = "counted" },
+    } },
+  } }
+  local c = B.SubjectRaidCounts(store, "Goat")
+  T.eq(#c, 2, "only raids Goat was present in")
+  T.eq(c[1], 2, "r1 (sorted first): 2 counted deaths")
+  T.eq(c[2], 1, "r2: 1 counted (cascade excluded)")
+  T.eq(#B.SubjectRaidCounts(store, "Nobody"), 0, "absent player -> empty history")
+  T.eq(#B.SubjectRaidCounts({ raids = {} }, "Goat"), 0, "no raids -> empty")
 end

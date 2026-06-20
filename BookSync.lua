@@ -71,13 +71,22 @@ local function windowDeaths(t0, t1)
 end
 
 local function roster()
+  if ns.Demo and ns.Demo.active and ns.Demo.DemoNames then
+    local names = { myName() }
+    for _, nm in ipairs(ns.Demo.DemoNames(24)) do names[#names + 1] = nm end
+    return names
+  end
   local out = {}
   local n = (GetNumGroupMembers and GetNumGroupMembers()) or 0
-  local prefix = (IsInRaid and IsInRaid()) and "raid" or "party"
+  local inRaid = IsInRaid and IsInRaid()
+  local prefix = inRaid and "raid" or "party"
   for i = 1, n do
     local nm = UnitName and UnitName(prefix .. i)
     if nm then out[#out + 1] = nm end
   end
+  -- party units (party1..N) exclude the player, so add self; raid units (raidN) already
+  -- include the player. Without this, a 5-man dropped the local player from the roster.
+  if not inRaid then out[#out + 1] = myName() end
   if #out == 0 then out[#out + 1] = myName() end
   return out
 end
@@ -180,7 +189,9 @@ function B.OnWhisper(text, sender)
   if not cfg().collusionWatch then return end
   local score = ns.Book.ScoreWhisper(text)
   if score < 2 then return end
-  local snippet = (text or ""):sub(1, 120)
+  -- strip the pipe delimiter from the forwarded snippet so it can't truncate/garble the
+  -- "BCOL|sender|snippet" addon message on the admin's side (Book messages aren't escaped).
+  local snippet = ((text or ""):sub(1, 120)):gsub("|", "/")
   B.lastFlag = { sender = sender, snippet = snippet }
   ns.Print("|cffff5555Possible bet-rigging whisper from " .. tostring(sender)
     .. ".|r Type /agnb book report to forward it to officers.")
@@ -211,14 +222,23 @@ function B.OnCollusionReport(who, rest)
 end
 
 -- Admin: close the book at raid end -> everyone computes settlement + checksum.
+-- The runner resolves the Raid Hot Seat locally first and ships its authoritative
+-- outcome + count in the close message so clients adopt one canonical result.
 function B.CloseBook()
   if not B.CanAdmin() then ns.Print("Only the raid leader/assist can close the book.") return end
-  send("BSET|1")
+  B.ResolveAndSettleRaidHS((time and time()) or 0)
+  local rh = rt.raidHS
+  local payload = (rh and ("%s|%s|%d"):format(rh.id, tostring(rh.outcome), rh.count or 0)) or "||"
+  send("BSET|1|" .. payload)
   B.OnCloseBook()
 end
 
-function B.OnCloseBook()
+-- rhsOutcome/rhsCount: the runner's authoritative Raid Hot Seat result (from the close
+-- message), adopted instead of a local recompute. nil on the runner's own call (already
+-- settled above) and for any client that didn't get them (falls back to local count).
+function B.OnCloseBook(rhsOutcome, rhsCount)
   rt.closed = true
+  B.ResolveAndSettleRaidHS((time and time()) or 0, rhsOutcome, rhsCount)
   if ns.Settlement and ns.Settlement.Compute then
     ns.Settlement.Compute()
     local chk = ns.Settlement.checksum
@@ -269,9 +289,46 @@ function B.OpenRound()
   send(("BO|%s|%s|%s|%s"):format(id, tostring(line), tostring(cfg().bookStakeOU or 0), tostring(cfg().bookStakeFB or 0)))
   B.OnOpen(id, line, cfg().bookStakeOU or 0, cfg().bookStakeFB or 0)
   ns.Print(("Betting open: Over/Under %.1f deaths this pull."):format(line))
+  -- Hot Seat sub-market: skip if fewer than 4 raiders (not enough to be meaningful)
+  local currentRoster = roster()
+  if #currentRoster >= 4 then
+    local seed = id
+    local n = ns.Book.TargetCount(#currentRoster)
+    local targets = ns.Book.RollTargets(seed, currentRoster, n)
+    -- build per-player death counts from all-time history (synced, so the line
+    -- is identical on every client and meaningful from the first pull)
+    local store = activeStore()
+    local deathCounts = {}
+    if store and store.allTime then
+      for name, p in pairs(store.allTime) do deathCounts[name] = p.deaths or 0 end
+    end
+    -- build payload: "name=line,name=line,..."
+    local parts = {}
+    local lines = {}
+    for _, name in ipairs(targets) do
+      local p = ns.Book.SurvivalLine(deathCounts, currentRoster, name)
+      lines[name] = p
+      parts[#parts + 1] = name .. "=" .. string.format("%.2f", p)
+    end
+    local payload = table.concat(parts, ",")
+    -- Hot Seat base stake: default to 5g if unset/blank, and hold it to 1..10g so
+    -- the betting window always shows a real wager (never 0g) and stays capped.
+    local hsStake = tonumber(cfg().bookStakeHS) or 5
+    if hsStake < 1 then hsStake = 5 elseif hsStake > 10 then hsStake = 10 end
+    local sHS = tostring(hsStake)
+    send(("BOH|%s|%s|%s|%s"):format(id, seed, sHS, payload))
+    B.OnOpenHotSeat(id, seed, sHS, payload)
+  end
 end
 
 function B.OnOpen(id, line, stakeOU, stakeFB)
+  -- Don't clobber a live round: re-applying the SAME id is an idempotent no-op (keeps
+  -- commits already received), and a DIFFERENT id while a round is still in progress is
+  -- rejected so a second admin re-opening can't wipe everyone's pending bets.
+  if rt.round then
+    if rt.round.id == id then return end
+    if rt.round.state ~= "SETTLED" then return end
+  end
   rt.round = {
     id = id, line = tonumber(line) or 0.5,
     stakeOU = tonumber(stakeOU) or 0, stakeFB = tonumber(stakeFB) or 0,
@@ -279,6 +336,205 @@ function B.OnOpen(id, line, stakeOU, stakeFB)
     fb = ns.Book.NewRound(nil, nil, "FB"),
     state = "OPEN",
   }
+  -- Apply a Hot Seat open (BOH) that arrived BEFORE this round open (BO) -- addon
+  -- messages can reorder under throttle, and without this the Hot Seat would be dropped.
+  if rt._pendingHS and rt._pendingHS.id == id then
+    local p = rt._pendingHS; rt._pendingHS = nil
+    B.OnOpenHotSeat(p.id, p.seed, p.sHS, p.payload)
+  end
+  refreshUI()
+end
+
+-- Parse the Hot Seat broadcast and attach rd.hs to the current round.
+-- payload: "name=line,name=line,..." (names never contain = or ,).
+function B.OnOpenHotSeat(id, seed, sHS, payload)
+  local rd = rt.round
+  if not rd or rd.id ~= id then
+    -- the round open hasn't arrived yet: buffer this so B.OnOpen can apply it on arrival.
+    rt._pendingHS = { id = id, seed = seed, sHS = sHS, payload = payload }
+    return
+  end
+  local targets, lines = {}, {}
+  for entry in (payload or ""):gmatch("[^,]+") do
+    local name, val = entry:match("^([^=]+)=(.+)$")
+    if name and val then
+      targets[#targets + 1] = name
+      lines[name] = tonumber(val) or 0.5
+    end
+  end
+  rd.hs = {
+    seed = seed, targets = targets, lines = lines,
+    stakeBase = tonumber(sHS) or 0,
+    round = ns.Book.NewRound(nil, nil, "HS"),
+    outcomes = {},
+  }
+  -- Pop the bet prompt from the open event (not just from a panel Refresh), so a player
+  -- who keeps the Book window closed still gets the between-pulls Hot Seat popup. Set the
+  -- Refresh guard so it doesn't double-pop. (self-target is handled inside the popup.)
+  if ns.BookUI then
+    ns.BookUI._popupShownFor = id
+    if ns.BookUI.ShowHotSeatPopup then ns.BookUI.ShowHotSeatPopup() end
+  end
+  refreshUI()
+end
+
+-- ===== Raid Hot Seat (whole-raid Over/Under on one nominated raider) =====
+
+-- Admin: open the raid-level market. Deals the subject (random, deterministic from a
+-- broadcast seed) unless overridden, sets the line (auto from the subject's recent raid
+-- counts, or overridden), and broadcasts it so every client agrees. Opens before the
+-- first pull.
+function B.OpenRaidHotSeat(subjectOverride, lineOverride)
+  if not cfg().bookEnabled then ns.Print("Wagering is off (enable it in Settings).") return end
+  if not B.CanAdmin() then ns.Print("Only the raid leader/assist can open the Raid Hot Seat.") return end
+  if rt.raidHS and rt.raidHS.state ~= "SETTLED" then ns.Print("A Raid Hot Seat is already running.") return end
+  local currentRoster = roster()
+  if #currentRoster < 4 then ns.Print("Need at least 4 raiders for a Raid Hot Seat.") return end
+  local id = tostring((GetTime and math.floor(GetTime() * 1000)) or math.random(1, 1e9))
+  local seed = id
+  local subject = subjectOverride
+  if not subject or subject == "" then
+    subject = ns.Book.RollTargets(seed, currentRoster, 1)[1]
+  end
+  if not subject then ns.Print("Could not pick a Raid Hot Seat subject.") return end
+  local line = tonumber(lineOverride)
+  if not line then
+    local store = activeStore()
+    line = ns.Book.AutoLine(ns.Book.SubjectRaidCounts(store or { raids = {} }, subject),
+                            cfg().bookRaidLineFallback or 3.5)
+  end
+  local stake = tonumber(cfg().bookStakeRHS) or 5
+  local openTime = (time and time()) or 0
+  send(("BRHO|%s|%s|%s|%s|%s|%d"):format(id, seed, subject, tostring(line), tostring(stake), openTime))
+  B.OnOpenRaidHS(id, seed, subject, line, stake, openTime)
+  ns.Print(("Raid Hot Seat open: Over/Under %.1f deaths on %s (whole raid)."):format(line, subject))
+end
+
+-- Build rt.raidHS from an open broadcast. Idempotent on the same id; never clobbers a
+-- raid HS that has already LOCKED (same guard spirit as B.OnOpen).
+function B.OnOpenRaidHS(id, seed, subject, line, stake, openTime)
+  if rt.raidHS then
+    if rt.raidHS.id == id then return end
+    if rt.raidHS.state ~= "SETTLED" then return end
+  end
+  rt.raidHS = {
+    id = id, seed = seed, subject = subject,
+    line = tonumber(line) or 0.5, stake = tonumber(stake) or 0,
+    state = "OPEN", openTime = tonumber(openTime) or 0,
+    round = ns.Book.NewRound(nil, nil, "RHS"),
+  }
+  -- Pop the bet prompt from the open event so it shows even with the Book window closed
+  -- (the popup itself no-ops for the subject). Set the Refresh guard to avoid a re-pop.
+  if ns.BookUI then
+    ns.BookUI._rhsPopupShownFor = id
+    if ns.BookUI.ShowRaidHotSeatPopup then ns.BookUI.ShowRaidHotSeatPopup() end
+  end
+  refreshUI()
+end
+
+-- Place a Raid Hot Seat bet ("over"/"under"). The subject can't bet on their own count.
+function B.PlaceRaidHS(pick)
+  local rh = rt.raidHS
+  if not (rh and rh.state == "OPEN") then ns.Print("No open Raid Hot Seat.") return end
+  if rh.subject == myName() then ns.Print("You're tonight's Hot Seat -- you can't bet on yourself.") return end
+  if rh.myPick then ns.Print("Your Raid Hot Seat bet is already locked.") return end
+  if not affordable(rh.stake) then return end
+  local nonce = genNonce()
+  local hash = ns.Hash.Commit(pick, nonce, myName())
+  rh.myPick = { pick = pick, nonce = nonce }
+  rh.round.commits[myName()] = hash  -- record our own commit so our reveal verifies locally
+  send(("BRHC|%s|%s"):format(rh.id, hash))
+  ns.Print(("Raid Hot Seat bet locked: %s %.1f on %s (%dg)."):format(pick, rh.line, rh.subject, rh.stake))
+  refreshUI()
+end
+
+function B.OnCommitRaidHS(id, sender, hash)
+  local rh = rt.raidHS
+  if not (rh and rh.id == id) then return end
+  ns.Book.AddCommit(rh.round, sender, hash)
+  refreshUI()
+end
+
+function B.OnRevealRaidHS(id, sender, pick, nonce)
+  local rh = rt.raidHS
+  if not (rh and rh.id == id) then return end
+  ns.Book.AddReveal(rh.round, sender, pick, nonce)
+  refreshUI()
+end
+
+-- Lock the raid HS at the first pull of the night: stop betting and reveal my side so
+-- the field is verifiable for the rest of the raid. Independent of the per-pull round.
+local function lockRaidHS()
+  local rh = rt.raidHS
+  if not (rh and rh.state == "OPEN") then return end
+  rh.state = "LOCKED"; rh.lockTime = (time and time()) or 0
+  ns.Book.Lock(rh.round)
+  if rh.myPick then
+    send(("BRHR|%s|%s|%s"):format(rh.id, rh.myPick.pick, rh.myPick.nonce))
+    ns.Book.AddReveal(rh.round, myName(), rh.myPick.pick, rh.myPick.nonce)
+  end
+  refreshUI()
+end
+
+-- Refresh the live subject count for the locked Raid Hot Seat tracker (panel display).
+function B.RefreshRaidHSCount()
+  local rh = rt.raidHS
+  if not (rh and rh.state == "LOCKED") then return end
+  local window = windowDeaths(rh.openTime, (time and time()) or 0)
+  local n = 0
+  for _, d in ipairs(window) do
+    if d.player == rh.subject and d.classification ~= "wipeCascade" then n = n + 1 end
+  end
+  rh.count = n
+end
+
+-- Resolve the raid HS at Close book: count the subject's counted deaths in the
+-- [openTime, closeTime] window, resolve O/U against the line, append a pari-mutuel
+-- ledger entry (reusing the OU fields so SettlementBreakdown/RoundDeltas settle it),
+-- and record bet results. All gold math is RoundDeltas/ResolveOU.
+-- outcomeOverride/countOverride (admin-authoritative): when the admin's close carries a
+-- resolved outcome, adopt it instead of recomputing locally, so every client agrees even
+-- if their death window differed. Additive -- a missing/garbage override falls back to the
+-- local count (current behavior), so it can only reduce divergence.
+function B.ResolveAndSettleRaidHS(closeTime, outcomeOverride, countOverride)
+  local rh = rt.raidHS
+  if not rh or rh.state == "SETTLED" then return end
+  rh.closeTime = closeTime or (time and time()) or 0
+  local counted
+  if outcomeOverride == "over" or outcomeOverride == "under" then
+    rh.outcome = outcomeOverride
+    counted = tonumber(countOverride) or 0
+  else
+    local window = windowDeaths(rh.openTime, rh.closeTime)
+    local subjectDeaths = {}
+    for _, d in ipairs(window) do
+      if d.player == rh.subject then subjectDeaths[#subjectDeaths + 1] = d end
+    end
+    -- ResolveOU counts non-cascade deaths in the list and compares to the line.
+    rh.outcome = ns.Book.ResolveOU(rh.line, subjectDeaths, nil)
+    counted = 0
+    for _, d in ipairs(subjectDeaths) do if d.classification ~= "wipeCascade" then counted = counted + 1 end end
+  end
+  rh.count = counted
+  rh.state = "SETTLED"
+
+  local stakeC = (rh.stake or 0) * 10000
+  rt.ledger = rt.ledger or {}
+  rt.seq = (rt.seq or 0) + 1
+  rt.ledger[#rt.ledger + 1] = {
+    seq = rt.seq, roundId = rh.id, raidHS = true, subject = rh.subject, line = rh.line,
+    ouReveals = copyMap(rh.round.reveals), ouOutcome = rh.outcome, ouStake = stakeC, ouCount = counted,
+  }
+  -- live Bet Records (gold, like recordResults for OU/FB)
+  local store = activeStore()
+  if store then
+    local deltas = ns.Book.RoundDeltas(rh.round.reveals, rh.outcome, stakeC)
+    for player, pick in pairs(rh.round.reveals) do
+      local c = deltas[player] or 0
+      local gold = (c >= 0) and math.floor(c / 10000 + 0.5) or -math.floor(-c / 10000 + 0.5)
+      ns.DB.RecordBetResult(store, player, pick == rh.outcome, gold)
+    end
+  end
   refreshUI()
 end
 
@@ -294,11 +550,13 @@ end
 function B.PlaceOU(pick)
   local rd = rt.round
   if not (rd and rd.state == "OPEN") then ns.Print("No open betting round.") return end
+  if rd.myOU then ns.Print("Your Over/Under bet is already locked for this round.") return end
   if not affordable(rd.stakeOU) then return end
   local nonce = genNonce()
+  local hash = ns.Hash.Commit(pick, nonce, myName())
   rd.myOU = { pick = pick, nonce = nonce }
-  rd.ou.commits[myName()] = nil  -- allow local re-pick before broadcast
-  send(("BCO|%s|%s"):format(rd.id, ns.Hash.Commit(pick, nonce, myName())))
+  rd.ou.commits[myName()] = hash  -- record our own commit so our reveal verifies locally
+  send(("BCO|%s|%s"):format(rd.id, hash))
   ns.Print("Over/Under bet locked in (hidden until the pull ends).")
   refreshUI()
 end
@@ -307,12 +565,37 @@ end
 function B.PlaceFB(pick)
   local rd = rt.round
   if not (rd and rd.state == "OPEN") then ns.Print("No open betting round.") return end
+  if rd.myFB then ns.Print("Your First Blood bet is already locked for this round.") return end
   if pick == myName() then ns.Print("You can't bet on your own death.") return end
   if not affordable(rd.stakeFB) then return end
   local nonce = genNonce()
+  local hash = ns.Hash.Commit(pick, nonce, myName())
   rd.myFB = { pick = pick, nonce = nonce }
-  send(("BCF|%s|%s"):format(rd.id, ns.Hash.Commit(pick, nonce, myName())))
+  rd.fb.commits[myName()] = hash  -- record our own commit so our reveal verifies locally
+  send(("BCF|%s|%s"):format(rd.id, hash))
   ns.Print("First Blood bet locked in.")
+  refreshUI()
+end
+
+-- place a Hot Seat bet on your dealt target ("survives"/"dies"; self -> survives only)
+function B.PlaceHS(side)
+  local rd = rt.round
+  if not (rd and rd.hs and rd.state == "OPEN") then ns.Print("No open betting round.") return end
+  if rd.myHS then ns.Print("Your Hot Seat bet is already locked for this round.") return end
+  local target = ns.Book.DealTarget(rd.hs.seed, rd.hs.targets, myName())
+  if not target then return end
+  if target == myName() and side ~= "survives" then
+    ns.Print("You can only bet on yourself to SURVIVE."); return
+  end
+  local stk = ns.Book.HotSeatStakes(rd.hs.lines[target] or 0.5, rd.hs.stakeBase)
+  local myStake = (stk.favSide == side) and stk.favStake or stk.dogStake
+  if not affordable(myStake) then return end
+  local nonce = genNonce()
+  local hash = ns.Hash.Commit(side, nonce, myName())
+  rd.myHS = { pick = side, nonce = nonce }
+  rd.hs.round.commits[myName()] = hash  -- record our own commit so our reveal verifies locally
+  send(("BCH|%s|%s"):format(rd.id, hash))
+  ns.Print(("Hot Seat bet on %s locked in (%s, risk %dg)."):format(target, side, myStake))
   refreshUI()
 end
 
@@ -324,6 +607,20 @@ function B.OnCommit(kind, id, sender, hash)
   refreshUI()
 end
 
+function B.OnCommitHS(id, sender, hash)
+  local rd = rt.round
+  if not (rd and rd.id == id and rd.hs) then return end
+  ns.Book.AddCommit(rd.hs.round, sender, hash)
+  refreshUI()
+end
+
+function B.OnRevealHS(id, sender, pick, nonce)
+  local rd = rt.round
+  if not (rd and rd.id == id and rd.hs) then return end
+  ns.Book.AddReveal(rd.hs.round, sender, pick, nonce)
+  refreshUI()
+end
+
 local function lockRound()
   local rd = rt.round
   if not (rd and rd.state == "OPEN") then return end
@@ -332,6 +629,7 @@ local function lockRound()
   -- different magnitude -- so it would exclude every death and resolve O/U to 0.
   rd.state = "LOCKED"; rd.lockTime = (time and time()) or 0
   ns.Book.Lock(rd.ou); ns.Book.Lock(rd.fb)
+  if rd.hs then ns.Book.Lock(rd.hs.round) end
   refreshUI()
 end
 
@@ -356,8 +654,53 @@ local function resolveRound()
     ns.Book.AddReveal(rd.ou, myName(), rd.myOU.pick, rd.myOU.nonce) end
   if rd.myFB then send(("BRF|%s|%s|%s"):format(rd.id, rd.myFB.pick, rd.myFB.nonce))
     ns.Book.AddReveal(rd.fb, myName(), rd.myFB.pick, rd.myFB.nonce) end
-  ns.Print(("Pull over: %d deaths -> %s. First blood: %s."):format(counted, rd.outcomeOU, rd.outcomeFB))
+  if rd.hs then
+    for _, t in ipairs(rd.hs.targets) do
+      rd.hs.outcomes[t] = ns.Book.ResolveHotSeat(t, window)
+    end
+    ns.Book.Resolve(rd.hs.round, "done")
+    if rd.myHS then
+      send(("BRH|%s|%s|%s"):format(rd.id, rd.myHS.pick, rd.myHS.nonce))
+      ns.Book.AddReveal(rd.hs.round, myName(), rd.myHS.pick, rd.myHS.nonce)
+    end
+  end
+  local hsNote = ""
+  if rd.hs then
+    local n = 0
+    for _ in pairs(rd.hs.outcomes) do n = n + 1 end
+    if n > 0 then hsNote = (" Hot Seat: %d resolved."):format(n) end
+  end
+  ns.Print(("Pull over: %d deaths -> %s. First blood: %s.%s"):format(counted, rd.outcomeOU, rd.outcomeFB, hsNote))
+  -- Admin-authoritative outcome: the runner broadcasts the resolved outcome so clients
+  -- whose local death window diverged (esp. trash pulls) adopt one canonical result.
+  -- Additive -- clients still resolve locally; this only overrides before settle.
+  if B.CanAdmin() then
+    local hsParts = {}
+    if rd.hs then
+      for _, t in ipairs(rd.hs.targets) do hsParts[#hsParts + 1] = t .. "=" .. tostring(rd.hs.outcomes[t]) end
+    end
+    send(("BRES|%s|%s|%d|%s|%s"):format(rd.id, tostring(rd.outcomeOU), counted,
+      tostring(rd.outcomeFB), table.concat(hsParts, ",")))
+  end
   if C_Timer and C_Timer.After then C_Timer.After(6, B.Settle) else B.Settle() end
+  refreshUI()
+end
+
+-- Adopt an admin-broadcast outcome (override the local resolution) before settlement.
+-- Only while RESOLVED-not-yet-SETTLED, so it can't double-append the ledger; if it
+-- arrives too late, the local result stands (current behavior). Verified admin only.
+function B.OnResolveBroadcast(id, ouOutcome, ouCount, fbOutcome, hsPayload)
+  local rd = rt.round
+  if not (rd and rd.id == id and rd.state == "RESOLVED") then return end
+  rd.outcomeOU = ouOutcome
+  rd.counted = tonumber(ouCount) or rd.counted
+  rd.outcomeFB = fbOutcome
+  if rd.hs and hsPayload and hsPayload ~= "" then
+    for entry in hsPayload:gmatch("[^,]+") do
+      local t, o = entry:match("^([^=]+)=(.+)$")
+      if t and o then rd.hs.outcomes[t] = o end
+    end
+  end
   refreshUI()
 end
 
@@ -401,13 +744,102 @@ function B.Settle()
     fbReveals = copyMap(rd.fb.reveals), fbOutcome = rd.outcomeFB, fbStake = fbStakeC,
   }
 
-  local store = ns.db and ns.db.store
+  local store = activeStore()   -- active (demo-aware) store so the Bet Records board
+                                -- shows results in the dev simulator too; identical
+                                -- to ns.db.store in real play
   if store then
     recordResults(store, rd.ou.reveals, rd.outcomeOU, ouStakeC)
     recordResults(store, rd.fb.reveals, rd.outcomeFB, fbStakeC)
   end
+  if rd.hs then
+    local hsOrders = {}
+    for player, side in pairs(rd.hs.round.reveals) do
+      hsOrders[player] = { target = ns.Book.DealTarget(rd.hs.seed, rd.hs.targets, player), side = side }
+    end
+    local hsStakeC = (rd.hs.stakeBase or 0) * 10000              -- COPPER base
+    rd.hs.result = ns.Book.MatchHotSeat(hsOrders, rd.hs.outcomes, rd.hs.lines, hsStakeC)
+    -- live Bet Records: only matched players (unmatched were refunded, no W/L)
+    local matched = {}
+    for _, pr in ipairs(rd.hs.result.pairs) do matched[pr.winner] = true; matched[pr.loser] = true end
+    if store then
+      for player in pairs(matched) do
+        local c = rd.hs.result.deltas[player] or 0
+        local gold = (c >= 0) and math.floor(c / 10000 + 0.5) or -math.floor(-c / 10000 + 0.5)
+        ns.DB.RecordBetResult(store, player, c >= 0, gold)
+      end
+    end
+    -- settlement ledger: store the MatchHotSeat INPUTS (copper base) so
+    -- SettlementBreakdown recomputes deltas the same way it does for OU/FB
+    rt.seq = (rt.seq or 0) + 1
+    rt.ledger[#rt.ledger + 1] = {
+      seq = rt.seq, roundId = rd.id, boss = ns.Tracking and ns.Tracking.currentBoss or nil,
+      hsOrders = hsOrders, hsOutcomes = rd.hs.outcomes, hsLines = rd.hs.lines, hsStakeBase = hsStakeC,
+    }
+  end
   rd.state = "SETTLED"
   refreshUI()
+end
+
+-- Restore the wagering toggle to whatever it was before the first DevSimOpen flipped it
+-- on (called from Demo.Clear). No-op if a sim never touched it.
+function B.RestoreSimConfig()
+  if B._simPrevBookEnabled ~= nil and ns.cfg then
+    ns.cfg.bookEnabled = B._simPrevBookEnabled
+    B._simPrevBookEnabled = nil
+  end
+end
+
+-- ===== Dev: solo round simulator (mock data; no group / sync / combat needed) =====
+
+-- Open a full round (OU/FB/HS) with the 25-man mock roster and inject random
+-- bets from the 24 NPCs, then pop the Hot Seat window so the dev can bet.
+function B.DevSimOpen()
+  if not (ns.Demo and ns.Demo.active) then
+    if ns.Demo and ns.Demo.Load then ns.Demo.Load() end
+  end
+  -- the sim needs wagering on; remember the real setting so Demo.Clear can restore it
+  -- instead of leaving the dev's wagering toggle flipped on after a sim.
+  if ns.cfg then
+    if B._simPrevBookEnabled == nil then B._simPrevBookEnabled = ns.cfg.bookEnabled end
+    ns.cfg.bookEnabled = true
+  end
+  B.OpenRound()                      -- builds OU/FB/HS locally; send() is a no-op solo
+  local rd = rt.round
+  if not rd then ns.Print("Sim: could not open a round.") return end
+  -- inject random NPC bets so the dev's bet has opponents to match
+  for _, name in ipairs(roster()) do
+    if name ~= myName() then
+      rd.ou.reveals[name] = (math.random() < 0.5) and "over" or "under"
+      if rd.hs then rd.hs.round.reveals[name] = (math.random() < 0.5) and "dies" or "survives" end
+    end
+  end
+  if ns.BookUI and ns.BookUI.ShowHotSeatPopup then ns.BookUI.ShowHotSeatPopup() end
+  refreshUI()
+  ns.Print("Sim: round open. Place your Hot Seat bet, then click 'Sim: resolve pull'.")
+end
+
+-- Lock + simulate a pull (random deaths for ~half the targets) + resolve + settle.
+function B.DevSimResolve()
+  if not (ns.Demo and ns.Demo.active) then ns.Print("Sim: load mock data first.") return end
+  local rd = rt.round
+  if not rd then ns.Print("Sim: open a round first.") return end
+  lockRound()                        -- LOCKED, lockTime = now (epoch)
+  local store, raidId = activeStore()
+  local raid = store and raidId and store.raids and store.raids[raidId]
+  if raid and rd.hs then
+    local t = rd.lockTime
+    for _, tgt in ipairs(rd.hs.targets) do
+      if math.random() < 0.5 then
+        raid.deaths[#raid.deaths + 1] = {
+          player = tgt, time = t, classification = "counted",
+          ability = "Cleave", sourceName = "Simulator", boss = "Sim", pullId = 99999,
+        }
+      end
+    end
+  end
+  resolveRound()                     -- endTime = now; resolves from the window; schedules Settle
+  refreshUI()
+  ns.Print("Sim: pull resolved. Results + Bet Records update shortly.")
 end
 
 -- ----- Death Draft -----
@@ -489,15 +921,31 @@ local function onAddon(_, _, prefix, msg, _, sender)
   if tag == "BO" then
     local id, line, sOU, sFB = rest:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
     if senderIsAdmin(who) then B.OnOpen(id, line, sOU, sFB) end
+  elseif tag == "BOH" then
+    local id, seed, sHS, payload = rest:match("^([^|]*)|([^|]*)|([^|]*)|(.*)$")
+    if senderIsAdmin(who) then B.OnOpenHotSeat(id, seed, sHS, payload) end
+  elseif tag == "BRHO" then
+    local id, seed, subject, line, stake, openTime = rest:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|(.*)$")
+    if senderIsAdmin(who) then B.OnOpenRaidHS(id, seed, subject, tonumber(line), tonumber(stake), tonumber(openTime)) end
+  elseif tag == "BRHC" then local id, h = rest:match("^([^|]*)|(.*)$"); B.OnCommitRaidHS(id, who, h)
+  elseif tag == "BRHR" then local id, p, n = rest:match("^([^|]*)|([^|]*)|(.*)$"); B.OnRevealRaidHS(id, who, p, n)
+  elseif tag == "BRES" then
+    local id, ouO, ouC, fbO, hs = rest:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|(.*)$")
+    if senderIsAdmin(who) then B.OnResolveBroadcast(id, ouO, ouC, fbO, hs) end
   elseif tag == "BCO" then local id, h = rest:match("^([^|]*)|(.*)$"); B.OnCommit("OU", id, who, h)
   elseif tag == "BCF" then local id, h = rest:match("^([^|]*)|(.*)$"); B.OnCommit("FB", id, who, h)
   elseif tag == "BRO" then local id, p, n = rest:match("^([^|]*)|([^|]*)|(.*)$"); B.OnReveal("OU", id, who, p, n)
   elseif tag == "BRF" then local id, p, n = rest:match("^([^|]*)|([^|]*)|(.*)$"); B.OnReveal("FB", id, who, p, n)
+  elseif tag == "BCH" then local id, h = rest:match("^([^|]*)|(.*)$"); B.OnCommitHS(id, who, h)
+  elseif tag == "BRH" then local id, p, n = rest:match("^([^|]*)|([^|]*)|(.*)$"); B.OnRevealHS(id, who, p, n)
   elseif tag == "BDO" then local id, a = rest:match("^([^|]*)|(.*)$"); if senderIsAdmin(who) then B.OnDraftOpen(id, a) end
   elseif tag == "BDC" then local id, h = rest:match("^([^|]*)|(.*)$"); B.OnDraftCommit(id, who, h)
   elseif tag == "BDR" then local id, s = rest:match("^([^|]*)|(.*)$"); B.OnDraftReveal(id, who, s)
   elseif tag == "BSET" then
-    if senderIsAdmin(who) then B.OnCloseBook() end
+    -- rest = "1|<rhsId>|<rhsOutcome>|<rhsCount>" (the trailing fields may be absent from
+    -- an older client; ResolveAndSettleRaidHS ignores a non-over/under outcome).
+    local _, _, rhsOut, rhsCnt = rest:match("^([^|]*)|?([^|]*)|?([^|]*)|?([^|]*)$")
+    if senderIsAdmin(who) then B.OnCloseBook(rhsOut, rhsCnt) end
   elseif tag == "BIGN" then
     local a, b = rest:match("^([^|]*)|(.*)$")
     if senderIsAdmin(who) then B.OnIgnorePull(tonumber(a) or 0, tonumber(b) or 0) end
@@ -534,6 +982,7 @@ ns.OnInit(function()
       end
     elseif event == "ENCOUNTER_START" or event == "PLAYER_REGEN_DISABLED" then
       lockRound()
+      lockRaidHS()
     elseif event == "ENCOUNTER_END" or event == "PLAYER_REGEN_ENABLED" then
       resolveRound()
     end

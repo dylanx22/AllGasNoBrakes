@@ -52,25 +52,54 @@ function B.SettlementBreakdown(rounds)
     return out[p]
   end
   for _, r in ipairs(rounds) do
-    local ou = B.RoundDeltas(r.ouReveals or {}, r.ouOutcome, r.ouStake or 0)
-    for p, pick in pairs(r.ouReveals or {}) do
-      local e, delta = ensure(p), ou[p] or 0
-      e.net = e.net + delta
-      e.lines[#e.lines + 1] = {
-        seq = r.seq, boss = r.boss, bet = ("O/U %.1f"):format(r.line or 0), pick = pick,
-        stake = r.ouStake or 0, outcome = ("%d deaths -> %s"):format(r.ouCount or 0, tostring(r.ouOutcome)),
-        result = resultLabel(delta), delta = delta,
-      }
-    end
-    local fb = B.RoundDeltas(r.fbReveals or {}, r.fbOutcome, r.fbStake or 0)
-    for p, pick in pairs(r.fbReveals or {}) do
-      local e, delta = ensure(p), fb[p] or 0
-      e.net = e.net + delta
-      e.lines[#e.lines + 1] = {
-        seq = r.seq, boss = r.boss, bet = "First Blood", pick = pick,
-        stake = r.fbStake or 0, outcome = ("first death: %s"):format(tostring(r.fbOutcome)),
-        result = resultLabel(delta), delta = delta,
-      }
+    if r.raidHS then
+      -- Raid-level Over/Under on one nominated raider: pari-mutuel, labeled distinctly.
+      local rh = B.RoundDeltas(r.ouReveals or {}, r.ouOutcome, r.ouStake or 0)
+      for p, pick in pairs(r.ouReveals or {}) do
+        local e, delta = ensure(p), rh[p] or 0
+        e.net = e.net + delta
+        e.lines[#e.lines + 1] = {
+          seq = r.seq, boss = r.boss,
+          bet = ("Raid Hot Seat: %s O/U %.1f"):format(tostring(r.subject), r.line or 0),
+          pick = pick, stake = r.ouStake or 0,
+          outcome = ("%s: %d deaths -> %s"):format(tostring(r.subject), r.ouCount or 0, tostring(r.ouOutcome)),
+          result = resultLabel(delta), delta = delta,
+        }
+      end
+    else
+      local ou = B.RoundDeltas(r.ouReveals or {}, r.ouOutcome, r.ouStake or 0)
+      for p, pick in pairs(r.ouReveals or {}) do
+        local e, delta = ensure(p), ou[p] or 0
+        e.net = e.net + delta
+        e.lines[#e.lines + 1] = {
+          seq = r.seq, boss = r.boss, bet = ("O/U %.1f"):format(r.line or 0), pick = pick,
+          stake = r.ouStake or 0, outcome = ("%d deaths -> %s"):format(r.ouCount or 0, tostring(r.ouOutcome)),
+          result = resultLabel(delta), delta = delta,
+        }
+      end
+      local fb = B.RoundDeltas(r.fbReveals or {}, r.fbOutcome, r.fbStake or 0)
+      for p, pick in pairs(r.fbReveals or {}) do
+        local e, delta = ensure(p), fb[p] or 0
+        e.net = e.net + delta
+        e.lines[#e.lines + 1] = {
+          seq = r.seq, boss = r.boss, bet = "First Blood", pick = pick,
+          stake = r.fbStake or 0, outcome = ("first death: %s"):format(tostring(r.fbOutcome)),
+          result = resultLabel(delta), delta = delta,
+        }
+      end
+      if r.hsOrders then
+        local hs = B.MatchHotSeat(r.hsOrders, r.hsOutcomes or {}, r.hsLines or {}, r.hsStakeBase or 0)
+        for p, o in pairs(r.hsOrders) do
+          local e, delta = ensure(p), hs.deltas[p] or 0
+          e.net = e.net + delta
+          e.lines[#e.lines + 1] = {
+            seq = r.seq, boss = r.boss, bet = "Hot Seat: " .. tostring(o.target), pick = o.side,
+            stake = r.hsStakeBase or 0,
+            outcome = ("%s -> %s"):format(tostring(o.target), tostring((r.hsOutcomes or {})[o.target])),
+            result = resultLabel(delta), delta = delta,
+          }
+        end
+      end
     end
   end
   return out
@@ -81,6 +110,37 @@ function B.NetsFromBreakdown(bd)
   local nets = {}
   for p, e in pairs(bd) do nets[p] = e.net end
   return nets
+end
+
+-- Round a zero-sum net table (copper) so every value is a whole number of gold
+-- while the table still sums to zero -- so the actual transfers are whole-gold and
+-- nobody ever has to trade silver/copper. Largest-remainder: floor each net to gold,
+-- then hand the few leftover whole-gold units to the largest fractional remainders
+-- (ties broken by name, for cross-client determinism). Pari-mutuel splits (e.g.
+-- 3 losers' 15g shared by 2 winners = 7g50s each) are what create the sub-gold
+-- amounts; this absorbs that fractional drift into the rounding.
+function B.RoundNetsToGold(nets)
+  local names = {}
+  for p in pairs(nets) do names[#names + 1] = p end
+  table.sort(names)
+  local base, frac, need = {}, {}, 0
+  for _, p in ipairs(names) do
+    local f = (nets[p] or 0) / 10000
+    local b = math.floor(f)           -- toward -inf, so frac is always in [0,1)
+    base[p], frac[p] = b, f - b
+    need = need - b                   -- leftover whole-gold units = -sum(floors)
+  end
+  local order = {}
+  for _, p in ipairs(names) do order[#order + 1] = p end
+  table.sort(order, function(a, b)
+    if frac[a] ~= frac[b] then return frac[a] > frac[b] end
+    return a < b
+  end)
+  local out = {}
+  for i, p in ipairs(order) do
+    out[p] = (base[p] + ((i <= need) and 1 or 0)) * 10000
+  end
+  return out
 end
 
 -- A tracking state over a transfer list. `paid` is the recipient's CUMULATIVE

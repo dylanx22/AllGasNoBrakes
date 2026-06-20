@@ -3,6 +3,51 @@
 All notable changes to **All Gas No Brakes: Death Tracker** are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.2.0] - 2026-06-19
+
+### Added
+- **Raid Hot Seat** (The Book): a whole-raid wager. At raid start the leader opens a
+  market (`/agnb book raidhs`) on one randomly-dealt raider — everyone else bets
+  Over/Under on that person's total deaths for the night. Pari-mutuel (no house, like
+  Over/Under), locks at the first pull, and settles into the end-of-raid Book
+  settlement. A popup floats at open for placing the bet; the subject can't bet on
+  themselves.
+- **Hot Seat** (The Book): a fourth wager. Each pull deals every raider one of a
+  few random targets; bet Survives or Dies on whether they make it. Bettors dealt
+  the same target who pick opposite sides are matched head-to-head and settled in
+  real gold at odds drawn from the target's death history — no house needed, the
+  pair funds itself, and the odds set the stake handicap. A between-pulls popup
+  shows your target, the odds, your risk/win, and their stats. Unmatched bets are
+  refunded ("no match this round").
+- **Book Admin report**: a settlement view that lists who pays whom and auto-updates
+  as payments are detected, with a per-player bet-by-bet audit.
+- **Mid-raid catch-up**: a player who loads in during a raid is whispered the recent
+  death log so their leaderboards fill in.
+- **Dev round simulator** (Settings → Advanced → Dev, mock data only): "Sim: open
+  round" and "Sim: resolve pull" drive a full 25-man round solo — popup, NPC bets,
+  and settlement — for testing without a raid. Dev tools are unlocked per-character
+  with `/agnb dev on`.
+
+### Changed
+- **Death sync is now leader-only** — only the raid leader/assist broadcasts deaths,
+  eliminating the burst of duplicate addon traffic during a wipe.
+- **Round outcomes are admin-authoritative** — clients adopt the book runner's
+  resolved result, fixing "numbers out of sync" on trash pulls.
+- **Settlement rounds to whole gold** so no one ever has to trade silver/copper; the
+  bet-by-bet audit keeps the exact amounts.
+- Combat-log handling no longer allocates per event, reducing stutter in heavy raid
+  combat; stored death timelines are pruned across raids to keep saved data small.
+
+### Fixed
+- The Hot Seat bet popup showed `0g` risk/win — it now shows the real gold amounts.
+- Hot Seat results now appear in the betting window, not only in chat.
+- 5-man (party) play no longer drops the local player from the betting roster.
+- Bets now **lock once placed** (one per round) — no re-clicking to change your pick,
+  and no changing your bet after a death lands mid-pull. Your own bet is also now
+  counted correctly in your settlement.
+
 ## [1.1.0] - 2026-06-19
 
 ### Added

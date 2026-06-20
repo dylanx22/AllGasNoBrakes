@@ -131,26 +131,29 @@ function B.RoundDeltas(reveals, outcome, stake)
   return deltas
 end
 
--- Group a raid's deaths into pulls (by local pullId) for the admin ignore-pull
--- picker. start/end are death.time (epoch) bounds so the broadcast void window is
--- cross-client stable. Most-recent pull first, capped to `limit` (default 6).
-function B.RecentPulls(deaths, limit)
+-- Group a raid's deaths into pulls by TIME-GAP clustering (deaths more than `gapSec`
+-- apart begin a new pull), for the admin ignore-pull picker + the pull-timeline view.
+-- NOT by pullId: synced deaths carry the broadcaster's LOCAL pullId, so pullId isn't a
+-- cross-client-stable key (it fragmented pulls across clients). start/end are death.time
+-- (epoch) bounds, so the void window is cross-client stable. Most-recent pull first,
+-- capped to `limit` (default 6).
+function B.RecentPulls(deaths, limit, gapSec)
   limit = limit or 6
-  local byPull, order = {}, {}
-  for _, d in ipairs(deaths) do
-    local id = d.pullId or 0
-    local g = byPull[id]
-    if not g then
-      g = { pullId = id, boss = d.boss, startTime = d.time, endTime = d.time, count = 0 }
-      byPull[id] = g; order[#order + 1] = id
+  gapSec = gapSec or 90
+  local sorted = {}
+  for _, d in ipairs(deaths) do sorted[#sorted + 1] = d end
+  table.sort(sorted, function(a, b) return (a.time or 0) < (b.time or 0) end)
+  local out, cur = {}, nil
+  for _, d in ipairs(sorted) do
+    local t = d.time or 0
+    if not cur or (t - cur.endTime) > gapSec then
+      cur = { boss = d.boss, startTime = t, endTime = t, count = 0 }
+      out[#out + 1] = cur
     end
-    if d.time < g.startTime then g.startTime = d.time end
-    if d.time > g.endTime then g.endTime = d.time end
-    if d.classification ~= "wipeCascade" then g.count = g.count + 1 end
-    g.boss = g.boss or d.boss
+    cur.endTime = t
+    if d.classification ~= "wipeCascade" then cur.count = cur.count + 1 end
+    cur.boss = cur.boss or d.boss
   end
-  local out = {}
-  for _, id in ipairs(order) do out[#out + 1] = byPull[id] end
   table.sort(out, function(a, b) return a.startTime > b.startTime end)
   while #out > limit do table.remove(out) end
   return out
@@ -231,4 +234,156 @@ function B.DraftStandings(assign, deaths)
     return a.player < b.player
   end)
   return out
+end
+
+-- ===== Hot Seat (per-pull head-to-head survival betting) =====
+
+-- Number of spotlight targets for a roster: ~1 per 6 raiders, clamped to [2,5].
+function B.TargetCount(rosterSize)
+  local n = math.floor((rosterSize or 0) / 6 + 0.5)
+  if n < 2 then n = 2 elseif n > 5 then n = 5 end
+  return n
+end
+
+-- Probability the player dies this pull, RELATIVE to the present raid's death
+-- counts (we have no true per-pull denominator). avg=0 -> pick'em. Clamped
+-- [0.10,0.80] so odds/stakes stay sane (favorite never risks > 4x the base).
+function B.SurvivalLine(deathCounts, roster, player)
+  deathCounts = deathCounts or {}
+  local total, n = 0, 0
+  for _, name in ipairs(roster or {}) do
+    total = total + (deathCounts[name] or 0); n = n + 1
+  end
+  if n == 0 or total == 0 then return 0.5 end
+  local avg = total / n
+  local p = 0.5 * ((deathCounts[player] or 0) / avg)
+  if p < 0.10 then p = 0.10 elseif p > 0.80 then p = 0.80 end
+  return p
+end
+
+-- Per-raid counted (non-cascade) death counts for one player, only for raids they were
+-- present in (had any death record), sorted by raid key for cross-client determinism.
+-- Feeds Book.AutoLine to set the Raid Hot Seat line from recent history.
+function B.SubjectRaidCounts(store, subject)
+  local out = {}
+  local keys = {}
+  for k in pairs((store and store.raids) or {}) do keys[#keys + 1] = k end
+  table.sort(keys)
+  for _, k in ipairs(keys) do
+    local raid = store.raids[k]
+    local counted, present = 0, false
+    for _, d in ipairs((raid and raid.deaths) or {}) do
+      if d.player == subject then
+        present = true
+        if d.classification ~= "wipeCascade" then counted = counted + 1 end
+      end
+    end
+    if present then out[#out + 1] = counted end
+  end
+  return out
+end
+
+local function round5(x) return math.floor(x / 5 + 0.5) * 5 end
+
+-- American moneyline string for a win probability p.
+function B.OddsFromProb(p)
+  if p == 0.5 then return "EVEN" end
+  if p > 0.5 then return "-" .. round5(100 * p / (1 - p)) end
+  return "+" .. round5(100 * (1 - p) / p)
+end
+
+-- Up to n distinct targets from the roster, deterministic from seed. Roster is
+-- sorted first so the slate is independent of receipt order.
+function B.RollTargets(seed, roster, n)
+  local pool = {}
+  for _, name in ipairs(roster or {}) do pool[#pool + 1] = name end
+  table.sort(pool)
+  local rnd = prngFromSeed(tostring(seed))
+  for i = #pool, 2, -1 do            -- Fisher-Yates
+    local j = (rnd() % i) + 1
+    pool[i], pool[j] = pool[j], pool[i]
+  end
+  local out = {}
+  for i = 1, math.min(n or 0, #pool) do out[i] = pool[i] end
+  return out
+end
+
+-- One target for a player, deterministic from seed+player (roster-independent so
+-- every client can validate any player's deal). Self-deal is allowed; the caller
+-- restricts a self-dealt player to the "survives" side.
+function B.DealTarget(seed, targets, player)
+  if not targets or #targets == 0 then return nil end
+  local h = tonumber(ns.Hash.SHA256(tostring(seed) .. ":" .. tostring(player)):sub(1, 8), 16)
+  return targets[(h % #targets) + 1]
+end
+
+-- Did the target survive this pull? Literal: ANY recorded death (cascade or not)
+-- means "dies". `deaths` is the pull's windowed list.
+function B.ResolveHotSeat(target, deaths)
+  for _, d in ipairs(deaths or {}) do
+    if d.player == target then return "dies" end
+  end
+  return "survives"
+end
+
+-- Stake handicap from the line: the underdog stakes `base`, the favorite stakes
+-- base*(pFav/pDog). Winner takes the pot, so the realized odds equal the line.
+function B.HotSeatStakes(pDie, base)
+  base = base or 0
+  if pDie == 0.5 then return { favStake = base, dogStake = base, favSide = "even" } end
+  local favSide = (pDie > 0.5) and "dies" or "survives"
+  local pFav = (pDie > 0.5) and pDie or (1 - pDie)
+  local pDog = 1 - pFav
+  local favStake = math.floor(base * (pFav / pDog) + 0.5)
+  return { favStake = favStake, dogStake = base, favSide = favSide }
+end
+
+-- Head-to-head matching + settlement for one round of Hot Seat orders.
+-- Per target, pair dies-bettors with survives-bettors (sorted by name) at the
+-- target's handicap; the side matching the outcome wins the opponent's stake.
+-- Surplus on the longer side is unmatched (refunded). Gold deltas sum to 0.
+function B.MatchHotSeat(orders, outcomes, lines, base)
+  local deltas, pairs_, unmatched = {}, {}, {}
+  -- bucket players by target + side
+  local byTarget = {}
+  local names = {}
+  for player in pairs(orders) do names[#names + 1] = player end
+  table.sort(names)
+  for _, player in ipairs(names) do
+    deltas[player] = 0
+    local o = orders[player]
+    local t = byTarget[o.target]
+    if not t then t = { dies = {}, survives = {} }; byTarget[o.target] = t end
+    t[o.side][#t[o.side] + 1] = player
+  end
+  -- match within each target
+  local tkeys = {}
+  for k in pairs(byTarget) do tkeys[#tkeys + 1] = k end
+  table.sort(tkeys)
+  for _, target in ipairs(tkeys) do
+    local t = byTarget[target]
+    local stk = B.HotSeatStakes(lines[target] or 0.5, base)
+    local outcome = outcomes[target]
+    local nPair = math.min(#t.dies, #t.survives)
+    for i = 1, nPair do
+      local diesP, survP = t.dies[i], t.survives[i]
+      -- stake per side from favSide
+      local diesStake = (stk.favSide == "dies") and stk.favStake or stk.dogStake
+      local survStake = (stk.favSide == "survives") and stk.favStake or stk.dogStake
+      local winner, loser, amount
+      if outcome == "dies" then
+        winner, loser, amount = diesP, survP, survStake
+      else
+        winner, loser, amount = survP, diesP, diesStake
+      end
+      deltas[winner] = deltas[winner] + amount
+      deltas[loser] = deltas[loser] - amount
+      pairs_[#pairs_ + 1] = { target = target, winner = winner, loser = loser, amount = amount }
+    end
+    -- surplus on the longer side is unmatched
+    for i = nPair + 1, #t.dies do unmatched[#unmatched + 1] = { player = t.dies[i], target = target, side = "dies" } end
+    for i = nPair + 1, #t.survives do unmatched[#unmatched + 1] = { player = t.survives[i], target = target, side = "survives" } end
+  end
+  table.sort(unmatched, function(a, b) return a.player < b.player end)
+  return { deltas = deltas, pairs = pairs_, unmatched = unmatched }
 end

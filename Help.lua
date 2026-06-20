@@ -48,6 +48,8 @@ H.SETTING = {
   bookDraftAnte      = "Ante per player for the Death Draft (raid-leader set).",
   bookMaxBetPct      = "Cap your own wagering at this percent of your gold. 0 = no cap.",
   bookLineWindow     = "How many recent pulls feed the automatic Over/Under line.",
+  bookStakeHS        = "Underdog base stake for Hot Seat survival bets; the favorite's stake scales up by the odds (raid-leader set).",
+  bookStakeRHS       = "Flat stake for the Raid Hot Seat: a whole-raid Over/Under on one nominated raider's total deaths (raid-leader set).",
   debugLevel         = "Verbosity of the debug log. Leave on 'Errors only' unless troubleshooting.",
 }
 
