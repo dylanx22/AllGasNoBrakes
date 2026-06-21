@@ -3,7 +3,9 @@ ns = ns or __AGNB_NS
 ns.Debug = ns.Debug or {}
 local D = ns.Debug
 
-D.LEVELS = { off = 0, error = 1, info = 2, debug = 3 }
+-- "dev" is the firehose: per-message sync/book wire traffic. Above "debug" so normal
+-- troubleshooting on "debug" isn't buried under it -- only set "dev" when chasing sync timing.
+D.LEVELS = { off = 0, error = 1, info = 2, debug = 3, dev = 4 }
 D.MAX = 500
 
 -- ----- pure core -----
@@ -80,7 +82,7 @@ function D.Build()
 
   local hint = f:CreateFontString(nil,"OVERLAY","GameFontDisableSmall")
   hint:SetPoint("BOTTOMLEFT",12,14)
-  hint:SetText("Click the text, Ctrl+A, Ctrl+C to copy.  /agnb debug clear  |  /agnb debug level <off|error|info|debug>")
+  hint:SetText("Click the text, Ctrl+A, Ctrl+C to copy.  /agnb debug clear  |  /agnb debug level <off|error|info|debug|dev>")
   D.frame = f
   return f
 end
@@ -104,7 +106,7 @@ end
 
 function D.SetLevel(name)
   name = name or "error"
-  if D.LEVELS[name] == nil then ns.Print("debug levels: off, error, info, debug"); return end
+  if D.LEVELS[name] == nil then ns.Print("debug levels: off, error, info, debug, dev"); return end
   ns.cfg = ns.cfg or {}
   ns.cfg.debugLevel = name
   ns.Print("Debug level set to " .. name)

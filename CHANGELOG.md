@@ -5,6 +5,26 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-06-20
+
+### Added
+- **Mid-raid catch-up** — a late joiner or anyone who `/reload`s now backfills the recent death
+  log automatically. Made duplicate-proof by stamping each death with a stable id (the prior
+  attempt was disabled because clock differences spawned duplicate rows). Catch-up fires when the
+  group forms, and a raid assistant covers the case where the raid leader is the one who reloaded.
+- **Auto-rounds (The Book):** optional "only inside a raid instance" restriction.
+- A **"dev" debug level** plus sync/Book wire logging for troubleshooting (`/agnb debug level dev`).
+
+### Changed
+- **Mixed addon versions sync cleanly** — clients on different versions decode each other's death
+  messages instead of dropping them, so a mid-rollout raid stays in sync.
+- **Wagering opt-in** remembers a "No thanks" so it stops re-prompting every session.
+- **Raid Info** refreshes versions when you open it and ages out players who've left.
+
+### Fixed
+- Hardened settlement and sync against malformed/missing data (Hot Seat outcomes, broadcast
+  outcome validation, nil-guards, guarded timer + dropdown handlers).
+
 ## [1.2.1] - 2026-06-20
 
 ### Added

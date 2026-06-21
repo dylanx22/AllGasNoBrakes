@@ -49,6 +49,8 @@ CFG.DEFAULTS = {
   bookMaxBetPct = 50,          -- USER bankroll cap (% of gold); 0 = no cap
   bookAutoOpenOnReadyCheck = true,
   bookAutoRounds = false,      -- opt-in: auto-open a new round between pulls (admin turns it on)
+  bookAutoRoundsInstanceOnly = false,  -- when auto-rounds is on, only auto-open inside a raid instance
+  bookOptInDeclined = false,   -- user dismissed the wagering opt-in prompt; don't prompt again
   bookLineWindow = 5,          -- pulls of history used for the auto O/U line
   bookStakeHS = 5,             -- Hot Seat underdog base stake (gold, admin)
   bookStakeRHS = 5,            -- Raid Hot Seat flat stake (gold, admin)
@@ -212,7 +214,7 @@ CFG.USER_FACING_KEYS = {
   "wipeBannerEnabled", "wipeBannerSound", "wipeBannerStyle", "wipeBannerSeconds",
   "wipeTagline", "autoSummaryOnFinalBoss",
   -- gold & the book
-  "antiPrizeOptIn", "buyIn", "bookEnabled", "bookAutoOpenOnReadyCheck", "bookAutoRounds",
+  "antiPrizeOptIn", "buyIn", "bookEnabled", "bookAutoOpenOnReadyCheck", "bookAutoRounds", "bookAutoRoundsInstanceOnly",
   "collusionWatch", "bookStakeOU", "bookStakeFB", "bookDraftAnte",
   "bookMaxBetPct", "bookLineWindow", "bookStakeHS", "bookStakeRHS",
   -- advanced
@@ -264,6 +266,7 @@ CFG.SETTINGS_LAYOUT = {
       { kind = "check", key = "bookEnabled",             label = "Enable wagering (Over/Under, First Blood, Draft)", help = "bookEnabled" },
       { kind = "check", key = "bookAutoOpenOnReadyCheck", label = "Auto-open a betting round on ready check", help = "bookAutoOpenOnReadyCheck", admin = true },
       { kind = "check", key = "bookAutoRounds", label = "Auto-open a new round between pulls", help = "bookAutoRounds", admin = true },
+      { kind = "check", key = "bookAutoRoundsInstanceOnly", label = "...only inside a raid instance", help = "bookAutoRoundsInstanceOnly", admin = true },
       { kind = "check", key = "collusionWatch",          label = "Flag suspicious bet-fixing chatter to the admin", help = "collusionWatch", admin = true },
       { kind = "edit",  key = "bookStakeOU",   label = "Over/Under stake (gold)", numeric = true, help = "bookStakeOU", admin = true },
       { kind = "edit",  key = "bookStakeFB",   label = "First Blood stake (gold)", numeric = true, help = "bookStakeFB", admin = true },

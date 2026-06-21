@@ -206,7 +206,7 @@ local function fbInitialize(self)
   local function add(value, label)
     local info = UIDropDownMenu_CreateInfo()
     info.text, info.value = label or value, value
-    info.func = function() ns.Book.PlaceFB(value); UIDropDownMenu_SetText(self, label or value) end
+    info.func = ns.Debug.Guard("book-dd:firstblood", function() ns.Book.PlaceFB(value); UIDropDownMenu_SetText(self, label or value) end)
     UIDropDownMenu_AddButton(info)
   end
   add("none", "No deaths")
@@ -331,7 +331,7 @@ function BUI.Refresh()
         if nm then
           local info = UIDropDownMenu_CreateInfo()
           info.text, info.value = nm, nm
-          info.func = function() f._adminPick = nm; UIDropDownMenu_SetText(f.adminDD, nm) end
+          info.func = ns.Debug.Guard("book-dd:adminpick", function() f._adminPick = nm; UIDropDownMenu_SetText(f.adminDD, nm) end)
           UIDropDownMenu_AddButton(info)
         end
       end

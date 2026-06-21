@@ -92,9 +92,12 @@ end
 -- Raid Info rows: every group member with whether they run the addon (+ version), their WoW
 -- role, and who holds the AGNB (Book) admin. Versions come from the version pings (Sync).
 local function raidInfoRows()
-  if ns.Sync and ns.Sync.AnnounceVersion then ns.Sync.AnnounceVersion() end  -- nudge a fresh round
+  if ns.Sync then
+    if ns.Sync.AnnounceVersion then ns.Sync.AnnounceVersion() end   -- announce ours
+    if ns.Sync.RequestVersions then ns.Sync.RequestVersions() end   -- and ask peers to (re)announce
+  end
   local me = ns.MyName or (UnitName and UnitName("player"))
-  local peers = (ns.Sync and ns.Sync.peerVersions) or {}
+  local now = (GetTime and GetTime()) or 0
   local designated = ns.db and ns.db.designatedAdmin
   local out = {}
   local function add(unit, isSelf)
@@ -102,7 +105,7 @@ local function raidInfoRows()
     if not name then return end
     local isLeader = UnitIsGroupLeader and UnitIsGroupLeader(unit) or false
     local isAssist = UnitIsGroupAssistant and UnitIsGroupAssistant(unit) or false
-    local version = isSelf and ns.version or (peers[name] and peers[name].version)
+    local version = isSelf and ns.version or (ns.Sync and ns.Sync.FreshPeerVersion and ns.Sync.FreshPeerVersion(name, now))
     out[#out + 1] = {
       player = name, isLeader = isLeader, isAssist = isAssist,
       version = version, hasAddon = version ~= nil,

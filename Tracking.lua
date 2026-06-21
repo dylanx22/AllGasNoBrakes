@@ -302,6 +302,7 @@ function TR.OnCombatLog()
     killcam = ns.Killcam.Snapshot(TR.killcam, partial.player, ts),
   }
 
+  if ns.Sync and ns.Sync.StampId then ns.Sync.StampId(death) end  -- broadcaster assigns a stable id
   if ns.DB.RecordDeath(ns.db.store, TR.raidId, death, (GetTime and GetTime()) or nil) then
     if TR.pull then TR.pull.died[death.player] = true end
     ns.Log("debug", "death: " .. tostring(death.player) .. " <- " .. tostring(death.ability) .. " [" .. tostring(death.classification) .. "]")

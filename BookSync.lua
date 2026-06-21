@@ -22,7 +22,13 @@ local function myName() return ns.MyName or (UnitName and UnitName("player")) or
 
 local function send(msg)
   local chan = ns.Sync and ns.Sync.Channel and ns.Sync.Channel()
-  if chan and C_ChatInfo then C_ChatInfo.SendAddonMessage(ns.Sync.PREFIX, msg, chan) end
+  local kind = msg:match("^[^|]+") or msg:sub(1, 6)
+  if chan and C_ChatInfo then
+    ns.Log("dev", ("book tx %s -> %s"):format(kind, chan))
+    C_ChatInfo.SendAddonMessage(ns.Sync.PREFIX, msg, chan)
+  else
+    ns.Log("dev", "book tx skipped (no group channel): " .. kind)
+  end
 end
 
 -- leader / assist / dev may open rounds and set stakes
@@ -121,6 +127,13 @@ B.IsRaidContext = isRaid
 local function maybeAutoOpenRound()
   if not (cfg().bookEnabled and cfg().bookAutoRounds) then return end
   if not isRaid() then return end          -- raids only, not 5-man dungeons
+  if cfg().bookAutoRoundsInstanceOnly then  -- optional: restrict to raid instances
+    -- call IsInInstance directly: `x and f()` / `(f())` truncate the multi-return, dropping
+    -- the instanceType (t) we need.
+    local inInst, t
+    if IsInInstance then inInst, t = IsInInstance() end
+    if not (inInst and t == "raid") then return end
+  end
   if rt.closed then return end
   if not B.CanAdmin() then return end
   if rt.round and rt.round.state ~= "SETTLED" then return end
@@ -365,20 +378,30 @@ if StaticPopupDialogs then
     text = "Your raid is running The Book (death betting).\nEnable wagering so you can place bets?",
     button1 = "Enable", button2 = "No thanks",
     OnAccept = function()
-      if ns.cfg then ns.cfg.bookEnabled = true end
+      if ns.cfg then ns.cfg.bookEnabled = true; ns.cfg.bookOptInDeclined = false end
       refreshUI()
       if ns.BookUI then
         if ns.BookUI.ShowHotSeatPopup then ns.BookUI.ShowHotSeatPopup() end
         if ns.BookUI.ShowRaidHotSeatPopup then ns.BookUI.ShowRaidHotSeatPopup() end
       end
     end,
+    OnCancel = function()
+      if ns.cfg then ns.cfg.bookOptInDeclined = true end   -- remember "No thanks" across sessions
+    end,
     timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
   }
 end
 
+-- Pure gate: should the wagering opt-in prompt show? No if already enabled, previously
+-- declined, or already prompted this session.
+function B.ShouldPromptOptIn()
+  if cfg().bookEnabled then return false end
+  if cfg().bookOptInDeclined then return false end
+  if rt._optInPrompted then return false end
+  return true
+end
 local function maybePromptOptIn()
-  if cfg().bookEnabled then return end          -- already in
-  if rt._optInPrompted then return end          -- once per session, no nagging
+  if not B.ShouldPromptOptIn() then return end
   rt._optInPrompted = true
   if StaticPopup_Show then StaticPopup_Show("AGNB_BOOK_OPTIN") end
 end
@@ -979,6 +1002,7 @@ local function onAddon(_, _, prefix, msg, _, sender)
   if who == myName() then return end   -- skip our own echo (we apply locally on send)
   local tag, rest = msg:match("^(%u+)|(.*)$")
   if not tag then return end
+  ns.Log("dev", ("book rx %s from %s"):format(tag, tostring(who)))
   if tag == "BO" then
     local id, line, sOU, sFB = rest:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
     if senderIsAdmin(who) then B.OnOpen(id, line, sOU, sFB) end

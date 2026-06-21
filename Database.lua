@@ -13,6 +13,7 @@ local seenIndex = setmetatable({}, { __mode = "k" })
 -- also dedup by LOCAL receipt time (immune to clock skew). RECV_WINDOW < the fastest possible
 -- re-death (battle-rez) so it never merges two real deaths.
 local recvIndex = setmetatable({}, { __mode = "k" })
+local idIndex = setmetatable({}, { __mode = "k" })   -- raid -> { [death.id] = storedDeath }
 local RECV_WINDOW = 5
 -- Dedup the same death seen from different sources (own combat log, a synced copy from
 -- another broadcaster, a catch-up snapshot after /reload). Those copies carry timestamps
@@ -102,15 +103,51 @@ function DB.RecordDeath(store, raidId, death, now)
   local raid = ensureRaid(store, raidId)
   local seen = seenIndex[raid]
   if not seen then
-    -- first touch this session: seed from any deaths already loaded from SavedVariables.
     seen = {}
     for _, d in ipairs(raid.deaths) do markSeen(seen, d.player or "?", deathSec(d)) end
     seenIndex[raid] = seen
   end
   local player, sec = death.player or "?", deathSec(death)
+
+  -- ----- stable-id dedup (primary, clock-independent) -----
+  if death.id then
+    local ids = idIndex[raid]
+    if not ids then
+      ids = {}
+      for _, d in ipairs(raid.deaths) do if d.id then ids[d.id] = d end end
+      idIndex[raid] = ids
+    end
+    local existing = ids[death.id]
+    if existing then
+      -- already have this exact death; adopt a killcam the stored copy lacks, then drop.
+      if death.killcam and not existing.killcam then existing.killcam = death.killcam end
+      return false
+    end
+    -- new id, but a clock-skew-free local observation of the same death may already be stored
+    -- without an id (we saw it on the combat log before the broadcast arrived). Converge: stamp
+    -- the existing record with this id instead of adding a duplicate.
+    if now then
+      local rv = recvIndex[raid]
+      local prev = rv and rv[player]
+      if prev and prev.d and not prev.d.id and (now - prev.t) < RECV_WINDOW then
+        prev.d.id = death.id
+        ids[death.id] = prev.d
+        if death.killcam and not prev.d.killcam then prev.d.killcam = death.killcam end
+        -- note: rv[player] is intentionally not refreshed here -- the converged death now has
+        -- an id, so every later copy of it takes the id branch above (never the heuristic path).
+        return false
+      end
+    end
+    ids[death.id] = death
+    markSeen(seen, player, sec)
+    raid.deaths[#raid.deaths + 1] = death
+    if now then local rv = recvIndex[raid]; if not rv then rv = {}; recvIndex[raid] = rv end; rv[player] = { t = now, d = death } end
+    if not raid.excludeAllTime then applyAllTime(store, death) end
+    return true
+  end
+
+  -- ----- heuristic dedup (fallback for id-less records: local pre-broadcast / old clients) -----
   if isSeen(seen, player, sec) then return false end
-  -- clock-skew-proof: same player arriving within RECV_WINDOW of LOCAL time is the same death
-  -- from another source; keep whichever copy carries the killcam.
   local rv
   if now then
     rv = recvIndex[raid]; if not rv then rv = {}; recvIndex[raid] = rv end
@@ -123,8 +160,7 @@ function DB.RecordDeath(store, raidId, death, now)
   markSeen(seen, player, sec)
   raid.deaths[#raid.deaths + 1] = death
   if rv then rv[player] = { t = now, d = death } end
-
-  if not raid.excludeAllTime then applyAllTime(store, death) end  -- pug raids skip all-time
+  if not raid.excludeAllTime then applyAllTime(store, death) end
   return true
 end
 
